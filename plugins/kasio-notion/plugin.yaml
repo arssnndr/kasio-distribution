@@ -1,0 +1,21 @@
+name: kasio-notion
+version: 2.0.0
+description: "KASIO — Notion-backed financial tracker. 10 atomic tools for transactions, accounts, nominal parsing, and vision reading (receipt + screenshot)."
+author: "Paduka (Aris Sunandar)"
+kind: backend
+requires_env:
+  - NOTION_API_KEY
+  - KASIO_TRANSACTIONS_DS_ID
+  - KASIO_ACCOUNTS_DS_ID
+provides_tools:
+  - kasio_list_transactions
+  - kasio_save_transaction
+  - kasio_update_transaction
+  - kasio_archive_transaction
+  - kasio_list_accounts
+  - kasio_save_account
+  - kasio_update_account
+  - kasio_archive_account
+  - kasio_parse_nominal
+  - kasio_read_receipt
+  - kasio_read_screenshot

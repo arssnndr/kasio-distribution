@@ -1,0 +1,28 @@
+name: kasio
+version: 2.0.0
+description: "KASIO — Telegram bot catatan keuangan dengan Notion DB. Plugin + skill ter-bundle."
+hermes_requires: ">=0.12.0"
+author: "Paduka (Aris Sunandar)"
+license: "MIT"
+
+env_requires:
+  - name: NOTION_API_KEY
+    description: "Notion integration API key. Buat di https://www.notion.so/my-integrations"
+    required: true
+
+  - name: KASIO_TRANSACTIONS_DS_ID
+    description: "Notion data source ID untuk transactions DB"
+    required: true
+
+  - name: KASIO_ACCOUNTS_DS_ID
+    description: "Notion data source ID untuk accounts DB"
+    required: true
+
+  - name: MINIMAX_API_KEY
+    description: "MiniMax M3 API key untuk vision reading struk/screenshot. Optional."
+    required: false
+
+distribution_owned:
+  - plugins/
+  - skills/
+  - distribution.yaml
