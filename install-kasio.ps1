@@ -39,23 +39,35 @@ Write-Section "2/6 Installing kasio distribution..."
 # Resolve Hermes home (needed to detect existing profile)
 $HermesHome = if ($env:HERMES_HOME) { $env:HERMES_HOME } else { "$env:LOCALAPPDATA\hermes" }
 
+function Clear-DistributionGitMetadata($ProfileDir) {
+    # Hermes currently copies the clone's top-level .git into the profile.
+    # Git pack files are read-only on Windows, making the next update fail with
+    # WinError 5. Remove only git metadata; distribution.yaml keeps provenance,
+    # while config.yaml, .env, memories, sessions, and auth stay intact.
+    $ProfileGitDir = Join-Path $ProfileDir ".git"
+    if (Test-Path $ProfileGitDir) {
+        Get-ChildItem -LiteralPath $ProfileGitDir -Recurse -Force -File -ErrorAction SilentlyContinue |
+            ForEach-Object { $_.IsReadOnly = $false }
+        Remove-Item -LiteralPath $ProfileGitDir -Recurse -Force
+        Write-OK "Stale .git metadata cleaned"
+    }
+}
+
 # Detect: apakah profile sudah ada?
-$existingProfile = Get-Item (Join-Path $HermesHome "profiles\$ProfileName") -ErrorAction SilentlyContinue
+$ProfileDir = Join-Path $HermesHome "profiles\$ProfileName"
+$existingProfile = Get-Item $ProfileDir -ErrorAction SilentlyContinue
 $isUpdate = $null -ne $existingProfile
 
 if ($isUpdate) {
-    Write-Warn "Profile '$ProfileName' sudah ada - coba 'hermes profile update'"
-    try {
-        hermes profile update $ProfileName --yes 2>&1 | Out-Null
-        Write-OK "Updated via 'profile update'"
-    } catch {
-        Write-Warn "'profile update' gagal (mungkin Windows file lock di .git/)"
-        Write-Warn "Fallback: 'hermes profile install --force' (preserve user data: memories, sessions, .env)"
-        hermes profile install $Repo --name $ProfileName --force --yes
-        Write-OK "Reinstalled via 'profile install --force'"
-    }
+    Write-Warn "Profile '$ProfileName' sudah ada - menyiapkan update Windows-safe"
+    Clear-DistributionGitMetadata $ProfileDir
+
+    hermes profile update $ProfileName --yes
+    Clear-DistributionGitMetadata $ProfileDir
+    Write-OK "Updated via 'profile update'"
 } else {
     hermes profile install $Repo --name $ProfileName --yes
+    Clear-DistributionGitMetadata $ProfileDir
 }
 Write-OK "Installed"
 

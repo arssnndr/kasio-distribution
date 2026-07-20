@@ -4,7 +4,7 @@
 # ============================================================================
 # Usage:
 #   ./install-kasio.sh
-#   curl -fsSL https://raw.githubusercontent.com/arissunandar/kasio-distribution/main/install-kasio.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/arssnndr/kasio-distribution/main/install-kasio.sh | bash
 #
 # What it does:
 #   1. Verify Hermes installed
@@ -101,7 +101,7 @@ fi
 
 # 5. Activate profile
 echo -e "${BLUE}[4/6]${NC} Activating kasio profile..."
-hermes profile activate "${PROFILE_NAME}" --yes
+hermes profile use "${PROFILE_NAME}" --yes
 
 # 6. Verify
 echo -e "${BLUE}[5/6]${NC} Verifying installation..."
