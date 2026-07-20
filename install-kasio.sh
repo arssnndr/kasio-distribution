@@ -42,14 +42,24 @@ if ! command -v hermes &> /dev/null; then
 fi
 echo -e "${GREEN}✓ Hermes found${NC}"
 
-# 2. Install distribution
+# 2. Install / update distribution
 echo -e "${BLUE}[2/6]${NC} Installing kasio distribution from ${REPO}..."
-hermes profile install "${REPO}" --name "${PROFILE_NAME}" --yes
+
+# Resolve Hermes home (needed untuk detect existing profile)
+HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}"
+
+# Detect: apakah profile sudah ada?
+PROFILE_DIR="${HERMES_HOME}/profiles/${PROFILE_NAME}"
+if [ -d "${PROFILE_DIR}" ]; then
+    echo -e "${YELLOW}! Profile '${PROFILE_NAME}' sudah ada — pakai 'hermes profile update' (preserve user data)${NC}"
+    hermes profile update "${PROFILE_NAME}" --yes
+else
+    hermes profile install "${REPO}" --name "${PROFILE_NAME}" --yes
+fi
 echo -e "${GREEN}✓ Installed${NC}"
 
 # 3. Env file path
-HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}"
-ENV_FILE="${HERMES_HOME}/profiles/${PROFILE_NAME}/.env"
+ENV_FILE="${PROFILE_DIR}/.env"
 echo -e "${GREEN}✓ Env file: ${ENV_FILE}${NC}"
 
 # Ensure directory + file exists (hermes profile install doesn't auto-create .env)

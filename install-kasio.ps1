@@ -33,13 +33,25 @@ if (-not $hermes) {
 }
 Write-OK "Hermes found"
 
-# 2. Install distribution
+# 2. Install / update distribution
 Write-Section "2/6 Installing kasio distribution..."
-hermes profile install $Repo --name $ProfileName --yes
+
+# Resolve Hermes home (needed untuk detect existing profile)
+$HermesHome = if ($env:HERMES_HOME) { $env:HERMES_HOME } else { "$env:LOCALAPPDATA\hermes" }
+
+# Detect: apakah profile sudah ada?
+$existingProfile = Get-Item (Join-Path $HermesHome "profiles\$ProfileName") -ErrorAction SilentlyContinue
+$isUpdate = $null -ne $existingProfile
+
+if ($isUpdate) {
+    Write-Warn "Profile '$ProfileName' sudah ada — pakai 'hermes profile update' (preserve user data)"
+    hermes profile update $ProfileName --yes
+} else {
+    hermes profile install $Repo --name $ProfileName --yes
+}
 Write-OK "Installed"
 
 # 3. Env file path
-$HermesHome = if ($env:HERMES_HOME) { $env:HERMES_HOME } else { "$env:LOCALAPPDATA\hermes" }
 $EnvFile = Join-Path $HermesHome "profiles\$ProfileName\.env"
 Write-OK "Env file: $EnvFile"
 
