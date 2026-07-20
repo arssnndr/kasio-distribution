@@ -4,6 +4,8 @@ Pencatat keuangan pribadi via **Hermes Agent** + **Notion DB** + **AI vision (Mi
 
 > **Migrasi dari KASIO v2 (Telegram bot Grammy/Node)** ke **KASIO v3 (Hermes native)** — selesai 19 Juli 2026. Plan lengkap: [Notion page](https://app.notion.com/p/KASIO-Migration-Plan-to-Hermes-3a2ac5534df081638559f699f3c57c45).
 
+> ⚠️ **Penting untuk user Telegram:** Hermes Telegram gateway saat ini **tidak handle slash command** (`/saldo`, `/catat`, dll). Pakai **natural language** aja — lihat [Usage](#usage). Slash command hanya jalan di CLI/Desktop.
+
 ## Quick Install
 
 **Cara paling simple — one-shot script:**
@@ -50,17 +52,84 @@ Setelah install, plugin dan skill langsung aktif di profile `kasio`.
 
 ## Usage
 
-Di chat Hermes (Telegram / CLI / Desktop), bilang:
+KASIO v3 (Hermes native) merespon **natural language** melalui AI agent — bukan slash command.
+
+**Cara paling natural (recommended):**
 
 ```
-catat makan siang 35rb            → wizard 6-step catat transaksi
-/saldo                            → cek saldo semua rekening
-transfer 100rb dari BCA ke Cash   → wizard 5-step transfer
-laporan                           → aggregation by kategori
-cari kopi                         → search by keyword
-[kirim foto struk/screenshot]     → vision auto-extract
-undo                              → archive transaksi terakhir (30s window)
+catat makan siang 35rb
+transfer 100rb dari BCA ke Cash
+saldo
+laporan minggu ini
+cari kopi
+undo
+batal
 ```
+
+Bebas bahasa informal: `gw sarpan 30k cash`, `cek duit`, `gaji masuk 5jt bca`, dll — AI akan parse.
+
+### Contoh lengkap wizard catat (6-step)
+
+```
+You:  catat sarapan 30000
+Bot:  📝 Step 1/6 — Nama: Sarapan           ✓
+      💰 Step 2/6 — Nominal: Rp 30.000      ✓
+      💼 Step 3/6 — Pilih rekening:
+          1. 🏦 BCA (Rp 33.456)
+          2. 💵 Cash (Rp 187.000)
+          3. 📱 Gopay (Rp 427)
+          4. 🏦 Seabank (Rp 236.952)
+You:  2
+Bot:  🔴 Step 4/6 — Tipe: Pengeluaran      ✓
+      🍽️ Step 5/6 — Kategori: ? (1-8)
+You:  1
+Bot:  📌 Step 6/6 — Catatan (skip dengan "skip"):
+You:  skip
+Bot:  ✅ Tersimpan. ID: xxx. Bisa di-undo dalam 30s.
+```
+
+### Kenapa bukan `/saldo`?
+
+Di Telegram, slash command (`/saldo`, `/catat`) **tidak diproses** oleh Hermes gateway — user akan dapat error:
+
+> `/saldo: Unknown command. Type /commands to see what's available, or resend without the leading slash to send as a regular message.`
+
+Slash command masih jalan kalau kamu pakai:
+- **CLI**: `hermes chat "saldo"` atau langsung ketik `saldo` di interactive mode
+- **Desktop app**: tinggal chat biasa tanpa `/`
+
+Solusinya cukup **ketik tanpa leading slash** — AI agent akan tangkap sebagai natural language dan trigger tool yang sesuai.
+
+### Command reference (natural language)
+
+| Intent | Contoh | Tool yang dipanggil |
+|---|---|---|
+| Catat transaksi | `catat kopi 25rb` / `beli bakso 15rb cash` | `kasio_save_transaction` (wizard 6-step) |
+| Transfer | `kirim 100rb dari BCA ke Cash` | 2x `kasio_save_transaction` (linked via transfer_group) |
+| Cek saldo | `saldo` / `cek duit` / `balance` | `kasio_list_accounts` + `kasio_list_transactions` |
+| Laporan | `laporan` / `pengeluaran minggu ini` / `laporan juni` | aggregasi dari `kasio_list_transactions` |
+| Cari transaksi | `cari kopi` / `history grab` | `kasio_list_transactions` filter by nama |
+| Undo | `undo` / `batalkan tadi` | `kasio_archive_transaction` (≤30s) |
+| Batal wizard | `batal` / `reset` | reset wizard state |
+| Vision (foto struk) | kirim foto struk | `kasio_read_receipt` → preview → konfirmasi |
+| Vision (mutasi bank) | kirim foto mutasi + caption "mutasi" | `kasio_read_screenshot` → preview → konfirmasi |
+
+### Nominal parser
+
+Plugin `kasio_parse_nominal` support format:
+- `35000` → 35.000
+- `35rb` / `35k` → 35.000
+- `1.5jt` / `1.5juta` → 1.500.000
+- `1,2 juta` → 1.200.000
+- `2.5m` → 2.500.000
+
+### Undo
+
+Setiap `kasio_save_transaction` otomatis dicatat di session memory. Bilang `undo` dalam **30 detik** setelah save → row di-archive (soft-delete). Lebih dari 30s: tolak, harus hapus manual di Notion.
+
+### Transfer link
+
+Transfer = 2 row di Notion DB, linked via UUID `transfer_group`. `undo` bakal archive 2 row sekaligus (atomic).
 
 ## ⏰ Cron Reminder (Auto)
 
