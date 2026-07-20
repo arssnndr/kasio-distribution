@@ -8,7 +8,7 @@
 
 $ErrorActionPreference = "Stop"
 
-$Repo = if ($env:KASIO_REPO) { $env:KASIO_REPO } else { "github.com/arissunandar/kasio-distribution" }
+$Repo = if ($env:KASIO_REPO) { $env:KASIO_REPO } else { "github.com/arssnndr/kasio-distribution" }
 $ProfileName = "kasio"
 
 function Write-Section($text) { Write-Host "[$text]" -ForegroundColor Cyan }

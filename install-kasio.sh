@@ -16,7 +16,7 @@
 
 set -e
 
-REPO="${KASIO_REPO:-github.com/arissunandar/kasio-distribution}"
+REPO="${KASIO_REPO:-github.com/arssnndr/kasio-distribution}"
 PROFILE_NAME="kasio"
 
 # Colors
