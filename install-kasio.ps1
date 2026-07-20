@@ -44,8 +44,16 @@ $existingProfile = Get-Item (Join-Path $HermesHome "profiles\$ProfileName") -Err
 $isUpdate = $null -ne $existingProfile
 
 if ($isUpdate) {
-    Write-Warn "Profile '$ProfileName' sudah ada - pakai 'hermes profile update' (preserve user data)"
-    hermes profile update $ProfileName --yes
+    Write-Warn "Profile '$ProfileName' sudah ada - coba 'hermes profile update'"
+    try {
+        hermes profile update $ProfileName --yes 2>&1 | Out-Null
+        Write-OK "Updated via 'profile update'"
+    } catch {
+        Write-Warn "'profile update' gagal (mungkin Windows file lock di .git/)"
+        Write-Warn "Fallback: 'hermes profile install --force' (preserve user data: memories, sessions, .env)"
+        hermes profile install $Repo --name $ProfileName --force --yes
+        Write-OK "Reinstalled via 'profile install --force'"
+    }
 } else {
     hermes profile install $Repo --name $ProfileName --yes
 }
@@ -103,9 +111,9 @@ if (-not $mmExisting) {
     }
 }
 
-# 5. Activate profile
+# 5. Activate profile (use 'hermes profile use', not 'activate')
 Write-Section "4/6 Activating kasio profile..."
-hermes profile activate $ProfileName --yes
+hermes profile use $ProfileName --yes
 
 # 6. Verify
 Write-Section "5/6 Verifying installation..."
