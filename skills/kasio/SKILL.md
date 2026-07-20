@@ -1,16 +1,16 @@
 ---
 name: kasio
-description: Financial tracker — catat transaksi, cek saldo, transfer antar rekening, baca struk/screenshot bank via vision, undo 30 detik. Pakai plugin `kasio-notion` (10 tools) sebagai backend.
+description: Financial tracker — catat transaksi, cek saldo, transfer antar rekening, baca struk/screenshot bank via vision, undo 30 detik. Pakai plugin `kasio-notion` (11 tools) sebagai backend.
 platforms: [linux, macos, windows]
 ---
 
 # KASIO Workflow
 
-KASIO = pencatat keuangan pribadi via Notion DB. Plugin `kasio-notion` menyediakan 10 atomic tools (`kasio_*`). Skill ini orchestrate tools tsb untuk UX wizard.
+KASIO = pencatat keuangan pribadi via Notion DB. Plugin `kasio-notion` menyediakan 11 atomic tools (`kasio_*`). Skill ini orchestrate tools tsb untuk UX wizard.
 
 ## Konsep Dasar
 
-- **Backend**: Plugin `kasio-notion` (10 tools registered di toolset `kasio`).
+- **Backend**: Plugin `kasio-notion` (11 tools registered di toolset `kasio`).
 - **DB schema**: Notion (transactions + accounts). 8 kategori tetap, 2 tipe, 2 status rekening.
 - **Multi-user**: Shared account (1 DB dipakai rame-rame). Tidak ada `user_id`. Semua transaksi campur.
 - **Transfer**: 2 row di transactions DB, linked via `transfer_group` UUID. Row A = Pengeluaran (rekening asal), Row B = Pemasukan (rekening tujuan).
@@ -37,7 +37,7 @@ KASIO = pencatat keuangan pribadi via Notion DB. Plugin `kasio-notion` menyediak
 - `Aktif`
 - `Diarsipkan`
 
-## 10 Tools Reference (pakai persis nama ini)
+## 11 Tools Reference (pakai persis nama ini)
 
 | Tool | Purpose | Key params |
 |---|---|---|

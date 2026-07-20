@@ -3,12 +3,57 @@
 Port dari KASIO v2 src/notion.js + src/notion-accounts.js. Bypass @notionhq/client
 SDK (yang v2.x belum support data_sources endpoint di Notion API 2025-09-03).
 Pakai httpx langsung + Notion-Version header.
+
+Features:
+  - Auto-retry dengan exponential backoff untuk 429 (rate limit) dan 5xx (server errors)
+  - Honoring Retry-After header dari Notion API
+  - Jitter untuk mencegah thundering herd
 """
 
 from __future__ import annotations
 import os
+import time
+import random
+import logging
 import httpx
-from .constants import NOTION_API_BASE, NOTION_VERSION, TX_PROP, ACCT_PROP
+
+# Support both package mode (production: from .constants import ...) and
+# top-level mode (testing: from constants import ...).
+try:
+    from .constants import NOTION_API_BASE, NOTION_VERSION, TX_PROP, ACCT_PROP
+except ImportError:
+    from constants import NOTION_API_BASE, NOTION_VERSION, TX_PROP, ACCT_PROP
+
+# Logger for retry events (visible kalau plugin host configure logging)
+logger = logging.getLogger("kasio.notion")
+
+# Retry configuration
+MAX_RETRIES = int(os.environ.get("KASIO_MAX_RETRIES", "3"))
+BASE_DELAY_SEC = float(os.environ.get("KASIO_RETRY_BASE_DELAY", "1.0"))
+MAX_DELAY_SEC = float(os.environ.get("KASIO_RETRY_MAX_DELAY", "30.0"))
+RETRYABLE_STATUS_CODES = frozenset({429, 500, 502, 503, 504})
+
+
+def _calculate_backoff(attempt: int, retry_after: str | None = None) -> float:
+    """Calculate backoff delay with optional jitter.
+
+    Args:
+        attempt: 0-based retry attempt number (0 = first retry)
+        retry_after: Server-provided Retry-After header value (seconds)
+
+    Returns:
+        Delay in seconds (includes jitter)
+    """
+    if retry_after:
+        try:
+            return float(retry_after)
+        except (ValueError, TypeError):
+            pass  # Fall through to exponential backoff
+    # Exponential backoff: 1, 2, 4, 8, ... up to MAX_DELAY_SEC
+    delay = min(BASE_DELAY_SEC * (2 ** attempt), MAX_DELAY_SEC)
+    # Add jitter (±25%) to prevent thundering herd
+    jitter = delay * 0.25 * (2 * random.random() - 1)
+    return max(0.1, delay + jitter)
 
 
 class NotionClient:
@@ -43,19 +88,68 @@ class NotionClient:
     # Internal helpers
     # ------------------------------------------------------------------
 
+    def _request_with_retry(self, method: str, path: str, **kwargs) -> httpx.Response:
+        """HTTP request with retry/backoff on transient errors.
+
+        Retries on:
+          - 429 (Too Many Requests / rate limit)
+          - 500 (Internal Server Error)
+          - 502 (Bad Gateway)
+          - 503 (Service Unavailable)
+          - 504 (Gateway Timeout)
+
+        Does NOT retry on:
+          - 4xx other than 429 (client errors — request is bad, retry won't help)
+          - Network errors (handled by httpx timeout — caller can retry)
+
+        Honors Retry-After header if present (Notion includes it on 429).
+        """
+        last_exception: httpx.HTTPStatusError | None = None
+        for attempt in range(MAX_RETRIES + 1):
+            try:
+                resp = self._client.request(method, path, **kwargs)
+            except httpx.TimeoutException:
+                # Network timeout — don't retry automatically, let caller decide
+                # (retries on network errors can mask real connectivity issues)
+                raise
+            except httpx.NetworkError:
+                # Network error (DNS, connection refused, etc.) — also don't retry
+                raise
+
+            if resp.status_code in RETRYABLE_STATUS_CODES:
+                last_exception = httpx.HTTPStatusError(
+                    f"{resp.status_code} {resp.reason_phrase}",
+                    request=resp.request,
+                    response=resp,
+                )
+                if attempt < MAX_RETRIES:
+                    retry_after = resp.headers.get("Retry-After")
+                    delay = _calculate_backoff(attempt, retry_after)
+                    logger.warning(
+                        "Notion API %s %s -> %d (attempt %d/%d). Retrying in %.2fs",
+                        method, path, resp.status_code, attempt + 1, MAX_RETRIES + 1, delay,
+                    )
+                    time.sleep(delay)
+                    continue
+
+            # Either non-retryable status, or out of retries — raise if error
+            resp.raise_for_status()
+            return resp
+
+        # Exhausted all retries on retryable status code
+        assert last_exception is not None
+        raise last_exception
+
     def _post(self, path: str, body: dict) -> dict:
-        resp = self._client.post(path, json=body)
-        resp.raise_for_status()
+        resp = self._request_with_retry("POST", path, json=body)
         return resp.json()
 
     def _patch(self, path: str, body: dict) -> dict:
-        resp = self._client.patch(path, json=body)
-        resp.raise_for_status()
+        resp = self._request_with_retry("PATCH", path, json=body)
         return resp.json()
 
     def _get(self, path: str) -> dict:
-        resp = self._client.get(path)
-        resp.raise_for_status()
+        resp = self._request_with_retry("GET", path)
         return resp.json()
 
     @staticmethod

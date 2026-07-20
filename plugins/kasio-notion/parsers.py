@@ -17,6 +17,7 @@ def parse_nominal(input_str) -> int | None:
         "35rb"         -> 35000
         "35 ribu"      -> 35000
         "1.5jt"        -> 1500000
+        "1,2 juta"     -> 1200000  (koma sebagai desimal separator — Indonesian style)
         "2.3 juta"     -> 2300000
         "1m"           -> 1000000
         "1.000.000"    -> 1000000 (thousand separator)
@@ -27,14 +28,15 @@ def parse_nominal(input_str) -> int | None:
     cleaned = input_str.lower().replace(" ", "")
 
     # ribu variants: rb, ribu, k
-    m = re.match(r"^([\d]+(?:\.\d+)?)(rb|ribu|k)$", cleaned)
+    # Accept both . and , as decimal separator (1.5rb or 1,5rb)
+    m = re.match(r"^([\d]+(?:[.,]\d+)?)(rb|ribu|k)$", cleaned)
     if m:
-        return round(float(m.group(1)) * 1000)
+        return round(float(m.group(1).replace(",", ".")) * 1000)
 
     # juta variants: jt, juta, m
-    m = re.match(r"^([\d]+(?:\.\d+)?)(jt|juta|m)$", cleaned)
+    m = re.match(r"^([\d]+(?:[.,]\d+)?)(jt|juta|m)$", cleaned)
     if m:
-        return round(float(m.group(1)) * 1_000_000)
+        return round(float(m.group(1).replace(",", ".")) * 1_000_000)
 
     # plain number, optionally with thousand separator dots
     m = re.match(r"^[\d]+(?:\.\d+)*$", cleaned)
@@ -63,16 +65,29 @@ def parse_date(input_str: str) -> str | None:
         "2026-07-19"       -> 2026-07-19 (ISO)
         "19-07-2026"       -> 2026-07-19 (DD-MM-YYYY)
         "19/07/2026"       -> 2026-07-19
-    Returns: YYYY-MM-DD string, or None if unparseable.
+    Returns: YYYY-MM-DD string, or None if unparseable or invalid (e.g. month > 12).
     """
     if not input_str or not input_str.strip():
         return datetime.now(timezone.utc).date().isoformat()
     cleaned = input_str.strip()
     if re.match(r"^\d{4}-\d{2}-\d{2}$", cleaned):
-        return cleaned
+        # Validate month 1-12 and day 1-31 (light check; doesn't catch Feb 30 etc.)
+        try:
+            year, month, day = int(cleaned[:4]), int(cleaned[5:7]), int(cleaned[8:10])
+            if not (1 <= month <= 12 and 1 <= day <= 31):
+                return None
+            return cleaned
+        except ValueError:
+            return None
     m = re.match(r"^(\d{1,2})[-/](\d{1,2})[-/](\d{4})$", cleaned)
     if m:
-        return f"{m.group(3)}-{m.group(2).zfill(2)}-{m.group(1).zfill(2)}"
+        try:
+            day, month, year = int(m.group(1)), int(m.group(2)), int(m.group(3))
+            if not (1 <= month <= 12 and 1 <= day <= 31):
+                return None
+            return f"{year}-{month:02d}-{day:02d}"
+        except ValueError:
+            return None
     return None
 
 

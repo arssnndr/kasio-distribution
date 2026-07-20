@@ -1,6 +1,11 @@
 """Tool handlers + schemas for kasio-notion plugin.
 
-10 tools total. Each has:
+11 tools total:
+  - 4 transaction tools (list/save/update/archive)
+  - 4 account tools (list/save/update/archive)
+  - 3 utility tools (parse_nominal, read_receipt, read_screenshot)
+
+Each tool has:
   - SCHEMA (JSON schema for LLM)
   - handler (sync function returning string result)
 
@@ -11,9 +16,16 @@ from __future__ import annotations
 import json
 import base64
 from typing import Any
-from .client import NotionClient
-from .vision import VisionAPI
-from . import parsers, constants
+
+# Support both package mode (production) and top-level mode (testing).
+try:
+    from .client import NotionClient
+    from .vision import VisionAPI
+    from . import parsers, constants
+except ImportError:
+    from client import NotionClient
+    from vision import VisionAPI
+    import parsers, constants
 
 # Lazy clients (avoid init if env not ready)
 _notion: NotionClient | None = None

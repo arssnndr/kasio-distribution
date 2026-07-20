@@ -68,11 +68,19 @@ REKENING_STATUS_DIARSIPKAN = "Diarsipkan"
 
 
 def is_valid_kategori(s: str) -> bool:
-    return s in KATEGORI_LIST
+    """Check if string is a valid kategori. Returns False for unhashable types."""
+    try:
+        return s in KATEGORI_LIST
+    except TypeError:
+        return False
 
 
 def is_valid_tipe(s: str) -> bool:
-    return s in VALID_TIPE
+    """Check if string is a valid tipe. Returns False for unhashable types."""
+    try:
+        return s in VALID_TIPE
+    except TypeError:
+        return False
 
 # ============================================================================
 # API Configuration
