@@ -52,6 +52,10 @@ HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}"
 ENV_FILE="${HERMES_HOME}/profiles/${PROFILE_NAME}/.env"
 echo -e "${GREEN}✓ Env file: ${ENV_FILE}${NC}"
 
+# Ensure directory + file exists (hermes profile install doesn't auto-create .env)
+mkdir -p "$(dirname "${ENV_FILE}")"
+touch "${ENV_FILE}"
+
 # 4. Prompt for env values
 echo -e "${BLUE}[3/6]${NC} Setup environment variables..."
 echo

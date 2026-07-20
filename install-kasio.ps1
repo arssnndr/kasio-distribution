@@ -49,12 +49,20 @@ if (-not (Test-Path $envDir)) {
     New-Item -ItemType Directory -Path $envDir -Force | Out-Null
 }
 
+# Ensure .env file exists (hermes profile install doesn't auto-create it)
+if (-not (Test-Path $EnvFile)) {
+    New-Item -ItemType File -Path $EnvFile -Force | Out-Null
+}
+
 # 4. Prompt for env values
 Write-Section "3/6 Setup environment variables..."
 Write-Host ""
 
 function Append-IfEmpty($key, $description) {
-    if (Select-String -Path $EnvFile -Pattern "^$key=.+" -Quiet -ErrorAction SilentlyContinue) {
+    $existing = if (Test-Path $EnvFile) {
+        Select-String -Path $EnvFile -Pattern "^$key=.+" -Quiet -ErrorAction SilentlyContinue
+    } else { $false }
+    if ($existing) {
         Write-OK "$key (already set, skipping)"
         return
     }
@@ -70,7 +78,10 @@ Append-IfEmpty "KASIO_TRANSACTIONS_DS_ID" "Notion data source ID untuk transacti
 Append-IfEmpty "KASIO_ACCOUNTS_DS_ID" "Notion data source ID untuk accounts DB"
 
 # Optional
-if (-not (Select-String -Path $EnvFile -Pattern "^MINIMAX_API_KEY=.+" -Quiet -ErrorAction SilentlyContinue)) {
+$mmExisting = if (Test-Path $EnvFile) {
+    Select-String -Path $EnvFile -Pattern "^MINIMAX_API_KEY=.+" -Quiet -ErrorAction SilentlyContinue
+} else { $false }
+if (-not $mmExisting) {
     Write-Host "→ MINIMAX_API_KEY" -ForegroundColor Yellow
     Write-Host "  Optional — untuk vision reading foto struk"
     Write-Host "  Skip kalau tidak pakai (tekan Enter)"
