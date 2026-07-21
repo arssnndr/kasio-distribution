@@ -20,21 +20,23 @@ irm https://raw.githubusercontent.com/arssnndr/kasio-distribution/main/install-k
 
 Script akan:
 1. Verify Hermes ter-install
-2. Install distribution via `hermes profile install`
-3. Prompt for 3 env values (`NOTION_API_KEY`, `KASIO_TRANSACTIONS_DS_ID`, `KASIO_ACCOUNTS_DS_ID`) + 1 optional (`MINIMAX_API_KEY`)
-4. Activate profile `kasio`
+2. Download distribution sebagai zipball dari GitHub
+3. Extract & install **plugin `kasio-notion`** ke `~/.hermes/plugins/` + **skill `kasio`** ke `~/.hermes/skills/`
+4. Prompt for 3 env values (`NOTION_API_KEY`, `KASIO_TRANSACTIONS_DS_ID`, `KASIO_ACCOUNTS_DS_ID`) + 1 optional (`MINIMAX_API_KEY`)
 5. Verify plugin + skill loaded
 
 **Cara manual — 2 commands:**
 
 ```bash
-# 1. Install distribution via git protocol (works untuk public + private repo)
-hermes profile install github.com/arssnndr/kasio-distribution
+# 1. Install plugin langsung ke active profile
+hermes plugins install github.com/arssnndr/kasio-distribution
+# (jika CLI tidak support subfolder, pakai installer di atas)
 
-# 2. Activate profile & setup env
-hermes profile activate kasio
-nano ~/.hermes/profiles/kasio/.env  # Isi 4 values
+# 2. Setup env di profile aktif
+nano ~/.hermes/.env  # Isi 4 values
 ```
+
+> ℹ️ **Tidak membuat profile baru.** Plugin + skill ter-install ke profile Hermes yang **sedang aktif** sekarang. Aman dipakai berulang-ulang (idempotent): kalau sudah ada, di-backup → di-replace.
 
 **Total: ~2 menit** (setelah Hermes core ter-install di mesin tsb).
 
@@ -46,9 +48,9 @@ Distribution ini bundle:
 |---|---|---|
 | **Plugin** | `~/.hermes/plugins/kasio-notion/` | 11 atomic tools (Notion CRUD + parser + vision) |
 | **Skill** | `~/.hermes/skills/kasio/` | Workflow doc (wizard 6-step catat, 5-step transfer, undo 30s) |
-| **Profile** | `~/.hermes/profiles/kasio/` | Env + config |
+| **Env** | `~/.hermes/.env` | `NOTION_API_KEY`, 2 DB IDs, optional vision key |
 
-Setelah install, plugin dan skill langsung aktif di profile `kasio`.
+Setelah install, plugin dan skill langsung aktif di profile yang sedang kamu pakai. Tidak ada profile tambahan yang dibuat.
 
 ## Usage
 
@@ -168,6 +170,7 @@ Buat 2 Notion DB dengan properties berikut (case-sensitive!):
 - `Status` (Select: Aktif, Diarsipkan)
 - `Urutan` (Number)
 - `Ikon` (Rich text)
+- `Nomor Rekening` (Rich text) — opsional, simpan no. rekening seperti `6631305161`
 
 ### Kategori values (untuk Transactions DB)
 ```
@@ -245,16 +248,30 @@ Plugin pakai httpx bypass karena `@notionhq/client` SDK v2.x belum support:
 
 ## Update
 
+Re-run installer yang sama. Aman dipakai berulang-ulang (idempotent):
+
 ```bash
-hermes profile update kasio
+# macOS / Linux / Git Bash
+curl -fsSL https://raw.githubusercontent.com/arssnndr/kasio-distribution/main/install-kasio.sh | bash
+
+# Windows PowerShell
+irm https://raw.githubusercontent.com/arssnndr/kasio-distribution/main/install-kasio.ps1 | iex
 ```
 
-Akan re-pull dari GitHub, replace `distribution_owned` files (plugins + skills + manifest). User-owned (memories, sessions, auth.json) **tidak disentuh**.
+Existing `kasio-notion` plugin & `kasio` skill akan di-backup (timestamped) lalu di-replace dengan versi terbaru. Env, memories, sessions, auth **tidak disentuh**.
 
 ## Uninstall
 
 ```bash
-hermes profile remove kasio
+# Hapus plugin + skill (env tetap di ~/.hermes/.env, hapus manual kalau perlu)
+rm -rf ~/.hermes/plugins/kasio-notion
+rm -rf ~/.hermes/skills/kasio
+```
+
+Lalu hapus env vars dari `~/.hermes/.env`:
+```bash
+# Edit manual, hapus baris NOTION_API_KEY, KASIO_*, MINIMAX_API_KEY
+nano ~/.hermes/.env
 ```
 
 ## Migrasi dari KASIO v2 (Telegram bot)

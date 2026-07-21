@@ -1,9 +1,13 @@
 name: kasio
-version: 2.0.0
+version: 2.1.0
 description: "KASIO — Telegram bot catatan keuangan dengan Notion DB. Plugin + skill ter-bundle."
 hermes_requires: ">=0.12.0"
 author: "Paduka (Aris Sunandar)"
 license: "MIT"
+
+# Installer `install-kasio.{ps1,sh}` sekarang install plugin + skill langsung
+# ke profile Hermes yang SEDANG AKTIF, tidak membuat profile baru.
+# Source files ada di plugins/ dan skills/ (subfolder repo ini).
 
 env_requires:
   - name: NOTION_API_KEY
@@ -26,3 +30,5 @@ distribution_owned:
   - plugins/
   - skills/
   - distribution.yaml
+  - install-kasio.ps1
+  - install-kasio.sh
