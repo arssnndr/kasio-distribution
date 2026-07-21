@@ -266,7 +266,12 @@ class NotionClient:
         transfer_group: str | None = None,
     ) -> dict:
         """Create new transaction page. Returns parsed transaction."""
-        from .parsers import parse_date
+        # Lazy import to avoid circular dependency; support both package and
+        # top-level test modes.
+        try:
+            from .parsers import parse_date
+        except ImportError:
+            from parsers import parse_date
         date_val = parse_date(tanggal) if tanggal else parse_date("")
         properties = {
             TX_PROP["nama"]: {"title": [{"text": {"content": nama}}]},
@@ -287,9 +292,23 @@ class NotionClient:
 
     def update_transaction(self, page_id: str, updates: dict) -> dict:
         """Update fields on existing transaction. updates keys: nama, jumlah, tipe, kategori, tanggal, catatan, rekening_id, transfer_group."""
-        from .parsers import parse_date
+        # Lazy import to avoid circular dependency; support both package and
+        # top-level test modes.
+        try:
+            from .parsers import parse_date
+        except ImportError:
+            from parsers import parse_date
         properties = {}
         for key, value in updates.items():
+            # Special-case: rekening_id / rekening both route to the Notion
+            # relation field whose TX_PROP key is "rekening". The TX_PROP
+            # lookup alone would miss these aliases and silently drop the
+            # field. See commit 037e61a for the bug history.
+            if key in ("rekening", "rekening_id"):
+                properties[TX_PROP["rekening"]] = {
+                    "relation": [{"id": value}] if value else []
+                }
+                continue
             notion_field = TX_PROP.get(key)
             if not notion_field:
                 continue
@@ -303,11 +322,6 @@ class NotionClient:
                 properties[notion_field] = {"title": [{"text": {"content": value}}]}
             elif key == "catatan":
                 properties[notion_field] = {"rich_text": [{"text": {"content": value or ""}}]}
-            elif key in ("rekening", "rekening_id"):
-                # TX_PROP key is "rekening" mapped to Notion relation field.
-                # Accept both "rekening" and "rekening_id" as input keys for
-                # API ergonomics; route to the correct TX_PROP entry either way.
-                properties[TX_PROP["rekening"]] = {"relation": [{"id": value}] if value else []}
             elif key == "transfer_group":
                 properties[notion_field] = {"rich_text": [{"text": {"content": value or ""}}]}
         data = self._patch(f"/pages/{page_id}", {"properties": properties})

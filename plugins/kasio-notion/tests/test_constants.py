@@ -89,8 +89,14 @@ class TestAccountPropertyMap:
     def test_icon_column(self):
         assert ACCT_PROP["ikon"] == "Ikon"
 
+    def test_nomor_rekening_column(self):
+        """Nomor Rekening (rich_text) is optional, added to ACCT_PROP in 0.9.22
+        (commit 84534f4) so users can store bank account numbers alongside
+        each rekening."""
+        assert ACCT_PROP["nomor_rekening"] == "Nomor Rekening"
+
     def test_no_extra_keys(self):
-        expected = {"nama", "saldo_awal", "status", "urutan", "ikon"}
+        expected = {"nama", "saldo_awal", "status", "urutan", "ikon", "nomor_rekening"}
         assert set(ACCT_PROP.keys()) == expected
 
 

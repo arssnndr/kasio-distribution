@@ -13,6 +13,7 @@ Tests cover:
 """
 from __future__ import annotations
 import os
+import sys
 import time
 from unittest.mock import patch, MagicMock, PropertyMock
 
@@ -27,6 +28,18 @@ os.environ.setdefault("KASIO_ACCOUNTS_DS_ID", "22222222-2222-2222-2222-222222222
 # NOTE: We deliberately do NOT override KASIO_RETRY_BASE_DELAY / MAX_DELAY here,
 # because _calculate_backoff tests assert against the DEFAULT values (1.0 / 30.0).
 # Integration tests that need fast retries use monkeypatch per-test.
+
+# Register `parsers` as an attribute of the `client` module so the relative
+# import `from .parsers import parse_date` inside client.py resolves when
+# client is imported standalone (not as part of the kasio_notion package).
+# Without this, TestUpdateTransaction.test_*_routes_to_* that exercise
+# `tanggal` / `jumlah` paths crash with ImportError. Conftest.py already
+# adds the plugin dir to sys.path so `import parsers` works as top-level;
+# we then expose it as a submodule so the relative-import lookup succeeds.
+import parsers as _parsers_module  # noqa: E402
+import client as _client_module     # noqa: E402
+_client_module.parsers = _parsers_module
+sys.modules.setdefault("client.parsers", _parsers_module)
 
 from client import NotionClient, _calculate_backoff, MAX_RETRIES, RETRYABLE_STATUS_CODES
 
@@ -364,8 +377,262 @@ class TestNotionClientInit:
         with pytest.raises(RuntimeError, match="KASIO_ACCOUNTS_DS_ID"):
             NotionClient()
 
-    def test_valid_env_initializes(self, mock_httpx_client):
-        client = NotionClient()
+    def test_valid_env_initializes(self, mock_httpx_client, monkeypatch):
+        # Drop any pre-set env vars from the host shell (real ~/.hermes/.env
+        # leaks into pytest via parent env); then re-set our test fakes
+        # through monkeypatch so they auto-revert on teardown.
+        for var in ("NOTION_API_KEY", "KASIO_TRANSACTIONS_DS_ID",
+                    "KASIO_ACCOUNTS_DS_ID"):
+            monkeypatch.delenv(var, raising=False)
+        monkeypatch.setenv("NOTION_API_KEY", "ntn_test_fake_key_for_unit_tests")
+        monkeypatch.setenv("KASIO_TRANSACTIONS_DS_ID", "11111111-1111-1111-1111-111111111111")
+        monkeypatch.setenv("KASIO_ACCOUNTS_DS_ID", "22222222-2222-2222-2222-222222222222")
+        # Re-import client so module-level os.environ reads pick up the
+        # patched values. Patch sys.modules then re-import the module to
+        # re-execute the module-level env reads.
+        import importlib
+        import client as _client_mod
+        importlib.reload(_client_mod)
+        client = _client_mod.NotionClient()
         assert client.api_key == "ntn_test_fake_key_for_unit_tests"
-        assert client.transactions_ds_id is not None
-        assert client.accounts_ds_id is not None
+        assert client.transactions_ds_id == "11111111-1111-1111-1111-111111111111"
+        assert client.accounts_ds_id == "22222222-2222-2222-2222-222222222222"
+
+
+# ============================================================================
+# NotionClient.update_transaction — field routing (regression tests)
+# ============================================================================
+#
+# These tests guard against the bug where `rekening_id` was silently dropped
+# by update_transaction because TX_PROP uses "rekening" as the key mapped to
+# the Notion relation field. Reproducer: passing
+#   update_transaction(tx_id, {"rekening_id": "..."})
+# left Notion DB unchanged and the returned parse_transaction still showed
+# the old rekening_id. Fix accepts both "rekening" and "rekening_id" and
+# routes to TX_PROP["rekening"]. See commit 037e61a.
+
+
+def _mock_notion_page_response(page_id: str, **props) -> dict:
+        """Build a minimal Notion page response with the given property values.
+
+        Only the properties the code under test reads are populated; everything
+        else uses Notion-style empty containers so parse_transaction doesn't
+        blow up.
+        """
+        def _title(content: str) -> list:
+            return [{"type": "text", "text": {"content": content},
+                     "annotations": {"bold": False, "italic": False, "strikethrough": False,
+                                    "underline": False, "code": False, "color": "default"},
+                     "plain_text": content, "href": None}]
+
+        def _rich_text(content: str) -> list:
+            return [{"type": "text", "text": {"content": content}, "plain_text": content,
+                     "annotations": {"bold": False, "italic": False, "strikethrough": False,
+                                    "underline": False, "code": False, "color": "default"},
+                     "href": None}]
+
+        def _date(content: str) -> dict:
+            return {"date": {"start": content, "end": None, "time_zone": None}}
+
+        def _select(name: str) -> dict:
+            return {"select": {"id": f"sel-{name}", "name": name, "color": "default"}}
+
+        def _number(n) -> dict:
+            return {"number": n}
+
+        def _relation(*ids: str) -> dict:
+            return {"relation": [{"id": i} for i in ids]}
+
+        properties = {
+            "Nama": {"id": "title", "type": "title", "title": _title(props.get("nama", ""))},
+            "Angka": {"id": "angka", "type": "number", "number": props.get("jumlah")},
+            "Tipe": {"id": "tipe", "type": "select", **_select(props.get("tipe", ""))},
+            "Kategori": {"id": "kategori", "type": "select", **_select(props.get("kategori", ""))},
+            "Tanggal": {"id": "tanggal", "type": "date", **_date(props.get("tanggal", "1970-01-01"))},
+            "Catatan": {"id": "catatan", "type": "rich_text", "rich_text": _rich_text(props.get("catatan", ""))},
+            "Rekening": {"id": "rekening", "type": "relation", **_relation(*props.get("rekening_ids", []))},
+            "Transfer Group ID": {"id": "tg", "type": "rich_text", "rich_text": _rich_text(props.get("transfer_group", ""))},
+        }
+        return {"object": "page", "id": page_id, "properties": properties, "archived": False}
+
+
+class TestUpdateTransaction:
+    """Regression tests for update_transaction() field routing."""
+
+    TX_PAGE_ID = "3a4ac553-4df0-8153-a88e-f56e01d21353"
+    NEW_ACC_ID = "3a2ac553-4df0-8186-8d06-cd0d5d044248"  # Gopay
+
+    def _patch_with_response(self, notion_client, mock_httpx_client, response_page):
+        """Set up mock to return a PATCH response with the given page dict."""
+        mock_resp = MagicMock(spec=httpx.Response)
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = response_page
+        mock_resp.raise_for_status.return_value = None
+        mock_httpx_client.request.return_value = mock_resp
+
+    def test_rekening_id_routes_to_relation_field(self, notion_client, mock_httpx_client):
+        """regression: rekening_id input must reach Notion as the 'Rekening' relation.
+
+        Bug pre-fix: properties dict had no Rekening entry because
+        TX_PROP.get('rekening_id') returned None and the field was dropped.
+        """
+        page_response = _mock_notion_page_response(
+            self.TX_PAGE_ID,
+            nama="Token PLN",
+            jumlah=51900,
+            tipe="Pengeluaran",
+            kategori="Tagihan",
+            tanggal="2026-07-21",
+            rekening_ids=[self.NEW_ACC_ID],
+        )
+        self._patch_with_response(notion_client, mock_httpx_client, page_response)
+
+        notion_client.update_transaction(
+            self.TX_PAGE_ID, {"rekening_id": self.NEW_ACC_ID}
+        )
+
+        # Inspect the actual PATCH body sent to Notion.
+        mock_httpx_client.request.assert_called_once()
+        kwargs = mock_httpx_client.request.call_args.kwargs
+        sent_json = kwargs.get("json", {})
+        sent_props = sent_json.get("properties", {})
+        assert "Rekening" in sent_props, (
+            "BUG: rekening_id input was silently dropped — 'Rekening' "
+            "not present in PATCH body sent to Notion"
+        )
+        assert sent_props["Rekening"] == {"relation": [{"id": self.NEW_ACC_ID}]}
+
+    def test_rekening_alias_also_routes(self, notion_client, mock_httpx_client):
+        """The 'rekening' alias (TX_PROP key) must work too."""
+        page_response = _mock_notion_page_response(
+            self.TX_PAGE_ID, rekening_ids=[self.NEW_ACC_ID]
+        )
+        self._patch_with_response(notion_client, mock_httpx_client, page_response)
+
+        notion_client.update_transaction(
+            self.TX_PAGE_ID, {"rekening": self.NEW_ACC_ID}
+        )
+
+        sent_props = mock_httpx_client.request.call_args.kwargs["json"]["properties"]
+        assert sent_props["Rekening"] == {"relation": [{"id": self.NEW_ACC_ID}]}
+
+    def test_catatan_routes_to_rich_text(self, notion_client, mock_httpx_client):
+        """Catatan is rich_text — verify correct Notion property format."""
+        page_response = _mock_notion_page_response(self.TX_PAGE_ID, catatan="hello")
+        self._patch_with_response(notion_client, mock_httpx_client, page_response)
+
+        notion_client.update_transaction(
+            self.TX_PAGE_ID, {"catatan": "hello world"}
+        )
+        sent_props = mock_httpx_client.request.call_args.kwargs["json"]["properties"]
+        assert sent_props["Catatan"] == {"rich_text": [{"text": {"content": "hello world"}}]}
+
+    def test_jumlah_routes_to_number(self, notion_client, mock_httpx_client):
+        """Jumlah is a Number — verify float conversion."""
+        page_response = _mock_notion_page_response(self.TX_PAGE_ID, jumlah=12345)
+        self._patch_with_response(notion_client, mock_httpx_client, page_response)
+
+        notion_client.update_transaction(self.TX_PAGE_ID, {"jumlah": 12345})
+        sent_props = mock_httpx_client.request.call_args.kwargs["json"]["properties"]
+        assert sent_props["Angka"] == {"number": 12345.0}
+
+    def test_tipe_routes_to_select(self, notion_client, mock_httpx_client):
+        """Tipe is a Select — verify wrapped in select.name."""
+        page_response = _mock_notion_page_response(self.TX_PAGE_ID, tipe="Pemasukan")
+        self._patch_with_response(notion_client, mock_httpx_client, page_response)
+
+        notion_client.update_transaction(self.TX_PAGE_ID, {"tipe": "Pemasukan"})
+        sent_props = mock_httpx_client.request.call_args.kwargs["json"]["properties"]
+        assert sent_props["Tipe"] == {"select": {"name": "Pemasukan"}}
+
+    def test_kategori_routes_to_select(self, notion_client, mock_httpx_client):
+        """Kategori is a Select — same pattern as Tipe."""
+        page_response = _mock_notion_page_response(self.TX_PAGE_ID, kategori="Makanan & Minuman")
+        self._patch_with_response(notion_client, mock_httpx_client, page_response)
+
+        notion_client.update_transaction(self.TX_PAGE_ID, {"kategori": "Makanan & Minuman"})
+        sent_props = mock_httpx_client.request.call_args.kwargs["json"]["properties"]
+        assert sent_props["Kategori"] == {"select": {"name": "Makanan & Minuman"}}
+
+    def test_tanggal_routes_to_date(self, notion_client, mock_httpx_client):
+        """Tanggal is a Date — verify wrapped in date.start."""
+        page_response = _mock_notion_page_response(self.TX_PAGE_ID, tanggal="2026-07-21")
+        self._patch_with_response(notion_client, mock_httpx_client, page_response)
+
+        notion_client.update_transaction(self.TX_PAGE_ID, {"tanggal": "2026-07-21"})
+        sent_props = mock_httpx_client.request.call_args.kwargs["json"]["properties"]
+        assert sent_props["Tanggal"] == {"date": {"start": "2026-07-21"}}
+
+    def test_nama_routes_to_title(self, notion_client, mock_httpx_client):
+        """Nama is the Title property — verify title array format."""
+        page_response = _mock_notion_page_response(self.TX_PAGE_ID, nama="Sarapan")
+        self._patch_with_response(notion_client, mock_httpx_client, page_response)
+
+        notion_client.update_transaction(self.TX_PAGE_ID, {"nama": "Sarapan"})
+        sent_props = mock_httpx_client.request.call_args.kwargs["json"]["properties"]
+        assert sent_props["Nama"] == {"title": [{"text": {"content": "Sarapan"}}]}
+
+    def test_transfer_group_routes_to_rich_text(self, notion_client, mock_httpx_client):
+        """Transfer Group ID is a rich_text field."""
+        page_response = _mock_notion_page_response(self.TX_PAGE_ID, transfer_group="abc-123")
+        self._patch_with_response(notion_client, mock_httpx_client, page_response)
+
+        notion_client.update_transaction(
+            self.TX_PAGE_ID, {"transfer_group": "abc-123"}
+        )
+        sent_props = mock_httpx_client.request.call_args.kwargs["json"]["properties"]
+        assert sent_props["Transfer Group ID"] == {"rich_text": [{"text": {"content": "abc-123"}}]}
+
+    def test_unknown_key_is_silently_dropped(self, notion_client, mock_httpx_client):
+        """Keys not in TX_PROP should not produce any Notion property entry."""
+        page_response = _mock_notion_page_response(self.TX_PAGE_ID, catatan="x")
+        self._patch_with_response(notion_client, mock_httpx_client, page_response)
+
+        notion_client.update_transaction(
+            self.TX_PAGE_ID,
+            {"unknown_field": "value", "another": 42},
+        )
+        sent_props = mock_httpx_client.request.call_args.kwargs["json"]["properties"]
+        # Only unknown keys should be dropped; if everything is dropped the
+        # body is still valid (empty properties) — Notion accepts that.
+        assert "unknown_field" not in sent_props
+        assert "another" not in sent_props
+        assert sent_props == {}
+
+    def test_multiple_fields_in_one_call(self, notion_client, mock_httpx_client):
+        """Verify multiple updates in one call all reach the PATCH body."""
+        page_response = _mock_notion_page_response(
+            self.TX_PAGE_ID,
+            nama="Updated",
+            catatan="multi",
+            rekening_ids=[self.NEW_ACC_ID],
+        )
+        self._patch_with_response(notion_client, mock_httpx_client, page_response)
+
+        notion_client.update_transaction(self.TX_PAGE_ID, {
+            "nama": "Updated",
+            "catatan": "multi",
+            "rekening_id": self.NEW_ACC_ID,
+        })
+
+        sent_props = mock_httpx_client.request.call_args.kwargs["json"]["properties"]
+        assert sent_props["Nama"] == {"title": [{"text": {"content": "Updated"}}]}
+        assert sent_props["Catatan"] == {"rich_text": [{"text": {"content": "multi"}}]}
+        assert sent_props["Rekening"] == {"relation": [{"id": self.NEW_ACC_ID}]}
+
+    def test_parse_transaction_returns_routed_rekening(self, notion_client, mock_httpx_client):
+        """After update with rekening_id, the returned parse_transaction shows the new id."""
+        page_response = _mock_notion_page_response(
+            self.TX_PAGE_ID,
+            nama="Token PLN",
+            rekening_ids=[self.NEW_ACC_ID],
+        )
+        self._patch_with_response(notion_client, mock_httpx_client, page_response)
+
+        result = notion_client.update_transaction(
+            self.TX_PAGE_ID, {"rekening_id": self.NEW_ACC_ID}
+        )
+
+        # Without the fix, result would have rekening_id == None or stale value
+        # because parse_transaction re-reads the (unchanged) Notion page.
+        assert result.get("rekening_id") == self.NEW_ACC_ID
