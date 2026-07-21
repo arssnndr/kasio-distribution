@@ -303,8 +303,11 @@ class NotionClient:
                 properties[notion_field] = {"title": [{"text": {"content": value}}]}
             elif key == "catatan":
                 properties[notion_field] = {"rich_text": [{"text": {"content": value or ""}}]}
-            elif key == "rekening_id":
-                properties[notion_field] = {"relation": [{"id": value}] if value else []}
+            elif key in ("rekening", "rekening_id"):
+                # TX_PROP key is "rekening" mapped to Notion relation field.
+                # Accept both "rekening" and "rekening_id" as input keys for
+                # API ergonomics; route to the correct TX_PROP entry either way.
+                properties[TX_PROP["rekening"]] = {"relation": [{"id": value}] if value else []}
             elif key == "transfer_group":
                 properties[notion_field] = {"rich_text": [{"text": {"content": value or ""}}]}
         data = self._patch(f"/pages/{page_id}", {"properties": properties})
