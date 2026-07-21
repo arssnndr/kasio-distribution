@@ -26,6 +26,7 @@ ACCT_PROP = {
     "status": "Status",        # select
     "urutan": "Urutan",        # number
     "ikon": "Ikon",            # rich_text
+    "nomor_rekening": "Nomor Rekening",  # rich_text
 }
 
 # ============================================================================

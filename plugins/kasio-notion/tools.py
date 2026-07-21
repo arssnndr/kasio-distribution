@@ -274,6 +274,7 @@ SCHEMA_SAVE_ACCOUNT = {
                 "saldo_awal": {"type": "number", "description": "Saldo awal dalam Rupiah", "default": 0},
                 "urutan": {"type": "integer", "description": "Sort order (lower = top)"},
                 "ikon": {"type": "string", "description": "Emoji icon (misal: '🏦', '💳')"},
+                "nomor_rekening": {"type": "string", "description": "Nomor rekening (opsional, misal: '6631305161')"},
             },
             "required": ["nama"],
         },
@@ -289,6 +290,7 @@ def handle_save_account(args: dict) -> str:
             saldo_awal=args.get("saldo_awal", 0),
             urutan=args.get("urutan"),
             ikon=args.get("ikon", ""),
+            nomor_rekening=args.get("nomor_rekening", ""),
         )
         return _to_json({"saved": True, "account": acct})
     except Exception as e:
@@ -316,6 +318,7 @@ SCHEMA_UPDATE_ACCOUNT = {
                         "status": {"type": "string", "enum": ["Aktif", "Diarsipkan"]},
                         "urutan": {"type": "integer"},
                         "ikon": {"type": "string"},
+                        "nomor_rekening": {"type": "string", "description": "Nomor rekening (rich_text)"},
                     },
                 },
             },

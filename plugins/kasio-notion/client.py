@@ -329,6 +329,7 @@ class NotionClient:
             "status": (p.get(ACCT_PROP["status"], {}).get("select") or {}).get("name", "Aktif"),
             "urutan": p.get(ACCT_PROP["urutan"], {}).get("number"),
             "ikon": self._extract_rich_text(p.get(ACCT_PROP["ikon"])),
+            "nomor_rekening": self._extract_rich_text(p.get(ACCT_PROP["nomor_rekening"])),
             "archived": bool(page.get("archived")),
         }
 
@@ -366,6 +367,7 @@ class NotionClient:
         saldo_awal: float = 0,
         urutan: int | None = None,
         ikon: str = "",
+        nomor_rekening: str = "",
         status: str = "Aktif",
     ) -> dict:
         """Create new account."""
@@ -378,6 +380,8 @@ class NotionClient:
             properties[ACCT_PROP["urutan"]] = {"number": urutan}
         if ikon:
             properties[ACCT_PROP["ikon"]] = {"rich_text": [{"text": {"content": ikon}}]}
+        if nomor_rekening:
+            properties[ACCT_PROP["nomor_rekening"]] = {"rich_text": [{"text": {"content": nomor_rekening}}]}
         # Notion 2025-09-03: parent must use data_source_id, not database_id
         data = self._post("/pages", {"parent": {"type": "data_source_id", "data_source_id": self.accounts_ds_id}, "properties": properties})
         return self.parse_account(data)
@@ -396,6 +400,8 @@ class NotionClient:
             elif key == "status":
                 properties[notion_field] = {"select": {"name": value}}
             elif key == "ikon":
+                properties[notion_field] = {"rich_text": [{"text": {"content": value or ""}}]}
+            elif key == "nomor_rekening":
                 properties[notion_field] = {"rich_text": [{"text": {"content": value or ""}}]}
         data = self._patch(f"/pages/{page_id}", {"properties": properties})
         return self.parse_account(data)

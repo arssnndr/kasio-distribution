@@ -24,6 +24,7 @@ Dokumentasi schema DB yang di-assume plugin `kasio-notion`. **WAJIB match** deng
 | `Status` | select | ✅ | `Aktif` / `Diarsipkan` |
 | `Urutan` | number | ❌ | Sort order (lower = top) |
 | `Ikon` | rich_text | ❌ | Emoji icon |
+| `Nomor Rekening` | rich_text | ❌ | Nomor rekening (misal: `6631305161`) |
 
 ## Environment Variables
 
