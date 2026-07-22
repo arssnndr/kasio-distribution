@@ -1336,3 +1336,44 @@ class TestSaveTransaction:
         assert body["properties"]["Catatan"]["rich_text"][0]["text"]["content"].startswith(
             "SeaBank"
         )
+
+    def test_save_transaction_triggers_auto_refresh_hook(
+        self, notion_client, mock_httpx_client, monkeypatch
+    ):
+        """REGRESSION: save_transaction must auto-refresh the Notion summary
+        page so users see fresh saldo after every transaction.
+
+        Bug pre-fix: hook was only in handle_save_transaction (tools.py),
+        so direct client.save_transaction() calls (used by all internal
+        code paths and tests) bypassed the refresh — page only updated
+        via Telegram gateway path.
+        """
+        response_page = _mock_notion_page_response(
+            self.NEW_TX_PAGE_ID,
+            nama="Hook fires",
+            rekening_ids=[self.ACC_ID],
+        )
+        self._post_with_response(mock_httpx_client, response_page)
+
+        # Spy on _maybe_refresh_summary_page
+        import client as client_mod
+        fired = {"count": 0}
+        def spy_hook():
+            fired["count"] += 1
+        monkeypatch.setattr(client_mod, "_maybe_refresh_summary_page", spy_hook)
+
+        notion_client.save_transaction(
+            nama="Hook fires",
+            jumlah=100,
+            tipe="Pengeluaran",
+            kategori="Lainnya",
+            tanggal="2026-07-22",
+            rekening_id=self.ACC_ID,
+        )
+
+        assert fired["count"] == 1, (
+            f"Hook fired {fired['count']} times, expected 1. "
+            "save_transaction must call _maybe_refresh_summary_page once "
+            "after successful Notion POST."
+        )
+

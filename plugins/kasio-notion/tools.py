@@ -53,52 +53,14 @@ def get_vision() -> VisionAPI | None:
     return _vision
 
 
-def _maybe_refresh_summary_page():
-    """Re-render the Notion 'KASIO Ringkasan Harian' page after a transaction
-    mutation, so users see fresh saldo + cashflow without manual refresh.
-
-    Opt-in via KASIO_NOTION_SUMMARY_PAGE_ID env var. The refresh is best-effort:
-    failures here NEVER fail the originating transaction (which already
-    succeeded). Errors are logged to stderr for debugging.
-
-    Uses scripts/refresh_summary.py from the kasio-distribution repo. We
-    locate it by walking up from this file's directory until we find a
-    'scripts/refresh_summary.py' sibling, so the plugin works whether
-    installed as part of the kasio-distribution package or as a standalone
-    Hermes plugin (in which case summary auto-refresh is simply skipped).
-    """
-    page_id = os.environ.get("KASIO_NOTION_SUMMARY_PAGE_ID")
-    if not page_id:
-        return  # user opted out — feature is opt-in
-    # Locate scripts/refresh_summary.py
-    here = os.path.dirname(os.path.abspath(__file__))
-    candidates = [
-        os.path.join(here, "..", "..", "scripts", "refresh_summary.py"),  # plugin source layout
-        os.path.join(here, "..", "scripts", "refresh_summary.py"),       # plugin installed layout
-    ]
-    script = next((p for p in candidates if os.path.exists(p)), None)
-    if not script:
-        print(
-            f"[kasio] KASIO_NOTION_SUMMARY_PAGE_ID set but scripts/refresh_summary.py "
-            f"not found. Looked in: {candidates}",
-            file=sys.stderr,
-        )
-        return
-    try:
-        # Use the same Python interpreter that's running the plugin. Inherit
-        # env so NOTION_API_KEY, KASIO_*_DS_ID, KASIO_NOTION_SUMMARY_PAGE_ID
-        # all reach the child process.
-        subprocess.run(
-            [sys.executable, script],
-            check=False,         # don't propagate failure to caller
-            timeout=30,          # cap so a Notion outage can't hang us
-            capture_output=True, # suppress child stdout (too noisy for every tx)
-        )
-    except subprocess.TimeoutExpired:
-        print(f"[kasio] refresh_summary.py timed out after 30s", file=sys.stderr)
-    except Exception as e:
-        print(f"[kasio] refresh_summary.py failed: {type(e).__name__}: {e}",
-              file=sys.stderr)
+# Hook untuk auto-refresh Notion summary page lives in client.py (single
+# source of truth). tools.py calls it after each transaction handler.
+# Use try/except for package vs standalone modes (mirrors parsers import
+# pattern in client.py).
+try:
+    from .client import _maybe_refresh_summary_page
+except ImportError:
+    from client import _maybe_refresh_summary_page
 
 
 def _to_json(obj: Any) -> str:
