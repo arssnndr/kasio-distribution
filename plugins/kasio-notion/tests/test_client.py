@@ -864,3 +864,475 @@ class TestListAccountsSaldoLive:
         result = notion_client.list_accounts()
         cash = next(a for a in result if a["nama"] == "Cash")
         assert cash["saldo_live"] == -25000  # overdraft OK
+
+
+class TestSaveTransaction:
+    """Regression tests for save_transaction().
+
+    Ensures that save_transaction correctly serializes the rekening_id
+    parameter into the Notion 'Rekening' relation field. A previous
+    session saw a stale-pycache incident where the runtime plugin
+    returned `rekening_id: null` even though the relation was set in
+    source code — these tests pin that path so any future regression
+    shows up immediately.
+
+    Also covers: jumlah coercion, tipe/kategori select mapping, catatan
+    rich_text, transfer_group, parent shape, and missing rekening_id.
+    """
+
+    NEW_TX_PAGE_ID = "new-tx-page-001"
+    ACC_ID = "3a2ac553-4df0-81a7-b276-d6e93ae3a777"
+
+    def _post_with_response(self, mock_httpx_client, response_page):
+        """Configure mock_httpx_client so the next POST returns response_page.
+
+        Note: no `spec=httpx.Response` here. parse_transaction calls
+        `page.get(...)` (dict access), so the mock must accept .get().
+        Using spec=httpx.Response would lock the mock to httpx.Response's
+        actual API and reject dict-like access.
+        """
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = response_page
+        mock_resp.raise_for_status.return_value = None
+        mock_httpx_client.request.return_value = mock_resp
+
+    def test_rekening_id_serializes_to_relation_field(
+        self, notion_client, mock_httpx_client
+    ):
+        """REGRESSION: rekening_id must become Rekening.relation in POST body.
+
+        This is the exact bug we caught in the live session (22 Jul 2026):
+        save_transaction returned rekening_id=null even though source code
+        clearly sets the relation field. Pin this path so any regression
+        (stale pycache, monkey-patch, schema drift) fails loudly.
+        """
+        response_page = _mock_notion_page_response(
+            self.NEW_TX_PAGE_ID,
+            nama="Regression: rekening_id",
+            jumlah=10000,
+            tipe="Pengeluaran",
+            kategori="Lainnya",
+            tanggal="2026-07-22",
+            rekening_ids=[self.ACC_ID],
+        )
+        self._post_with_response(mock_httpx_client, response_page)
+
+        captured_body = {}
+
+        def capture_post(self, path, body=None):
+            captured_body["body"] = body
+            # Return response_page directly (already JSON-parsed dict), not
+            # the mock response object — save_transaction calls
+            # parse_transaction() which uses .get() on the result.
+            return response_page
+
+        notion_client._post = lambda path, body=None: capture_post(
+            notion_client, path, body
+        )
+
+        result = notion_client.save_transaction(
+            nama="Regression: rekening_id",
+            jumlah=10000,
+            tipe="Pengeluaran",
+            kategori="Lainnya",
+            tanggal="2026-07-22",
+            rekening_id=self.ACC_ID,
+        )
+
+        # Body MUST carry the relation field
+        body = captured_body["body"]
+        assert body is not None, "POST /pages was not called"
+        assert "Rekening" in body["properties"], (
+            f"Rekening missing from body. Properties sent: {list(body['properties'].keys())}"
+        )
+        assert body["properties"]["Rekening"] == {
+            "relation": [{"id": self.ACC_ID}]
+        }, f"Rekening relation malformed: {body['properties']['Rekening']}"
+
+        # Returned tx should also reflect the relation
+        assert result["rekening_id"] == self.ACC_ID
+
+    def test_missing_rekening_id_omits_relation(
+        self, notion_client, mock_httpx_client
+    ):
+        """If rekening_id is None, body MUST NOT include Rekening at all
+        (Notion rejects empty relation lists on creation)."""
+        response_page = _mock_notion_page_response(
+            self.NEW_TX_PAGE_ID, nama="No rekening",
+        )
+        self._post_with_response(mock_httpx_client, response_page)
+
+        captured_body = {}
+
+        def capture_post(self, path, body=None):
+            captured_body["body"] = body
+            # Return response_page directly (already JSON-parsed dict), not
+            # the mock response object — save_transaction calls
+            # parse_transaction() which uses .get() on the result.
+            return response_page
+
+        notion_client._post = lambda path, body=None: capture_post(
+            notion_client, path, body
+        )
+
+        notion_client.save_transaction(
+            nama="No rekening",
+            jumlah=5000,
+            tipe="Pengeluaran",
+            kategori="Lainnya",
+            tanggal="2026-07-22",
+        )
+
+        body = captured_body["body"]
+        assert "Rekening" not in body["properties"], (
+            "Empty Rekening relation must be omitted, not sent as empty list"
+        )
+
+    def test_jumlah_is_float_in_payload(
+        self, notion_client, mock_httpx_client
+    ):
+        """jumlah (int) must serialize as float — Notion API accepts both
+        but tests pin the current behavior."""
+        response_page = _mock_notion_page_response(
+            self.NEW_TX_PAGE_ID, nama="Int vs float", jumlah=15000,
+        )
+        self._post_with_response(mock_httpx_client, response_page)
+
+        captured_body = {}
+
+        def capture_post(self, path, body=None):
+            captured_body["body"] = body
+            # Return response_page directly (already JSON-parsed dict), not
+            # the mock response object — save_transaction calls
+            # parse_transaction() which uses .get() on the result.
+            return response_page
+
+        notion_client._post = lambda path, body=None: capture_post(
+            notion_client, path, body
+        )
+
+        notion_client.save_transaction(
+            nama="Int vs float",
+            jumlah=15000,
+            tipe="Pengeluaran",
+            kategori="Lainnya",
+            tanggal="2026-07-22",
+            rekening_id="acc-x",
+        )
+
+        body = captured_body["body"]
+        assert body["properties"]["Angka"] == {"number": 15000.0}
+
+    def test_tipe_and_kategori_use_select_wrapper(
+        self, notion_client, mock_httpx_client
+    ):
+        """Tipe/Kategori fields must use Notion select envelope."""
+        response_page = _mock_notion_page_response(
+            self.NEW_TX_PAGE_ID, nama="Select fields",
+            tipe="Pemasukan", kategori="Pendapatan",
+        )
+        self._post_with_response(mock_httpx_client, response_page)
+
+        captured_body = {}
+
+        def capture_post(self, path, body=None):
+            captured_body["body"] = body
+            # Return response_page directly (already JSON-parsed dict), not
+            # the mock response object — save_transaction calls
+            # parse_transaction() which uses .get() on the result.
+            return response_page
+
+        notion_client._post = lambda path, body=None: capture_post(
+            notion_client, path, body
+        )
+
+        notion_client.save_transaction(
+            nama="Select fields",
+            jumlah=1000,
+            tipe="Pemasukan",
+            kategori="Pendapatan",
+            tanggal="2026-07-22",
+        )
+
+        body = captured_body["body"]
+        assert body["properties"]["Tipe"] == {"select": {"name": "Pemasukan"}}
+        assert body["properties"]["Kategori"] == {"select": {"name": "Pendapatan"}}
+
+    def test_catatan_uses_rich_text_wrapper(
+        self, notion_client, mock_httpx_client
+    ):
+        """Catatan must use rich_text envelope (not plain string)."""
+        response_page = _mock_notion_page_response(
+            self.NEW_TX_PAGE_ID, nama="With note", catatan="SeaBank …4309 via GoPay",
+        )
+        self._post_with_response(mock_httpx_client, response_page)
+
+        captured_body = {}
+
+        def capture_post(self, path, body=None):
+            captured_body["body"] = body
+            # Return response_page directly (already JSON-parsed dict), not
+            # the mock response object — save_transaction calls
+            # parse_transaction() which uses .get() on the result.
+            return response_page
+
+        notion_client._post = lambda path, body=None: capture_post(
+            notion_client, path, body
+        )
+
+        notion_client.save_transaction(
+            nama="With note",
+            jumlah=2500,
+            tipe="Pengeluaran",
+            kategori="Lainnya",
+            tanggal="2026-07-22",
+            catatan="SeaBank …4309 via GoPay",
+        )
+
+        body = captured_body["body"]
+        assert body["properties"]["Catatan"] == {
+            "rich_text": [{"text": {"content": "SeaBank …4309 via GoPay"}}]
+        }
+
+    def test_catatan_empty_string_still_rich_text(
+        self, notion_client, mock_httpx_client
+    ):
+        """Catatan with empty string must still produce rich_text array."""
+        response_page = _mock_notion_page_response(
+            self.NEW_TX_PAGE_ID, nama="No note", catatan="",
+        )
+        self._post_with_response(mock_httpx_client, response_page)
+
+        captured_body = {}
+
+        def capture_post(self, path, body=None):
+            captured_body["body"] = body
+            # Return response_page directly (already JSON-parsed dict), not
+            # the mock response object — save_transaction calls
+            # parse_transaction() which uses .get() on the result.
+            return response_page
+
+        notion_client._post = lambda path, body=None: capture_post(
+            notion_client, path, body
+        )
+
+        notion_client.save_transaction(
+            nama="No note",
+            jumlah=100,
+            tipe="Pengeluaran",
+            kategori="Lainnya",
+            tanggal="2026-07-22",
+            catatan="",
+        )
+
+        body = captured_body["body"]
+        assert body["properties"]["Catatan"] == {
+            "rich_text": [{"text": {"content": ""}}]
+        }
+
+    def test_transfer_group_sets_rich_text(
+        self, notion_client, mock_httpx_client
+    ):
+        """transfer_group (UUID for paired transactions) → rich_text."""
+        response_page = _mock_notion_page_response(
+            self.NEW_TX_PAGE_ID, nama="Top-up out", transfer_group="abc-123-uuid",
+        )
+        self._post_with_response(mock_httpx_client, response_page)
+
+        captured_body = {}
+
+        def capture_post(self, path, body=None):
+            captured_body["body"] = body
+            # Return response_page directly (already JSON-parsed dict), not
+            # the mock response object — save_transaction calls
+            # parse_transaction() which uses .get() on the result.
+            return response_page
+
+        notion_client._post = lambda path, body=None: capture_post(
+            notion_client, path, body
+        )
+
+        notion_client.save_transaction(
+            nama="Top-up out",
+            jumlah=52000,
+            tipe="Pengeluaran",
+            kategori="Lainnya",
+            tanggal="2026-07-21",
+            rekening_id="acc-sea",
+            transfer_group="abc-123-uuid",
+        )
+
+        body = captured_body["body"]
+        assert body["properties"]["Transfer Group ID"] == {
+            "rich_text": [{"text": {"content": "abc-123-uuid"}}]
+        }
+
+    def test_no_transfer_group_omits_field(
+        self, notion_client, mock_httpx_client
+    ):
+        """Without transfer_group, that property should not be in the body."""
+        response_page = _mock_notion_page_response(
+            self.NEW_TX_PAGE_ID, nama="No transfer group",
+        )
+        self._post_with_response(mock_httpx_client, response_page)
+
+        captured_body = {}
+
+        def capture_post(self, path, body=None):
+            captured_body["body"] = body
+            # Return response_page directly (already JSON-parsed dict), not
+            # the mock response object — save_transaction calls
+            # parse_transaction() which uses .get() on the result.
+            return response_page
+
+        notion_client._post = lambda path, body=None: capture_post(
+            notion_client, path, body
+        )
+
+        notion_client.save_transaction(
+            nama="No transfer group",
+            jumlah=100,
+            tipe="Pengeluaran",
+            kategori="Lainnya",
+            tanggal="2026-07-22",
+        )
+
+        body = captured_body["body"]
+        assert "Transfer Group ID" not in body["properties"]
+
+    def test_parent_uses_data_source_id(
+        self, notion_client, mock_httpx_client
+    ):
+        """Notion API 2025-09-03: parent must use data_source_id, not
+        database_id. Pin this so a future migration doesn't break."""
+        response_page = _mock_notion_page_response(
+            self.NEW_TX_PAGE_ID, nama="Parent shape",
+        )
+        self._post_with_response(mock_httpx_client, response_page)
+
+        captured_body = {}
+
+        def capture_post(self, path, body=None):
+            captured_body["body"] = body
+            # Return response_page directly (already JSON-parsed dict), not
+            # the mock response object — save_transaction calls
+            # parse_transaction() which uses .get() on the result.
+            return response_page
+
+        notion_client._post = lambda path, body=None: capture_post(
+            notion_client, path, body
+        )
+
+        notion_client.save_transaction(
+            nama="Parent shape",
+            jumlah=100,
+            tipe="Pengeluaran",
+            kategori="Lainnya",
+            tanggal="2026-07-22",
+        )
+
+        body = captured_body["body"]
+        assert body["parent"]["type"] == "data_source_id"
+        assert body["parent"]["data_source_id"] == notion_client.transactions_ds_id
+        # Belt-and-braces: database_id key MUST NOT be present
+        assert "database_id" not in body["parent"]
+
+    def test_tanggal_parsed_and_serialized(
+        self, notion_client, mock_httpx_client
+    ):
+        """Tanggal string → parsers.parse_date → ISO date in body."""
+        response_page = _mock_notion_page_response(
+            self.NEW_TX_PAGE_ID, nama="Date parsing", tanggal="2026-07-21",
+        )
+        self._post_with_response(mock_httpx_client, response_page)
+
+        captured_body = {}
+
+        def capture_post(self, path, body=None):
+            captured_body["body"] = body
+            # Return response_page directly (already JSON-parsed dict), not
+            # the mock response object — save_transaction calls
+            # parse_transaction() which uses .get() on the result.
+            return response_page
+
+        notion_client._post = lambda path, body=None: capture_post(
+            notion_client, path, body
+        )
+
+        notion_client.save_transaction(
+            nama="Date parsing",
+            jumlah=100,
+            tipe="Pengeluaran",
+            kategori="Lainnya",
+            tanggal="21/07/2026",  # DD/MM/YYYY — supported by parse_date
+        )
+
+        body = captured_body["body"]
+        # parse_date turns "21/07/2026" into ISO "2026-07-21"
+        assert body["properties"]["Tanggal"]["date"]["start"] == "2026-07-21"
+
+    def test_full_jagocoffee_repro(
+        self, notion_client, mock_httpx_client
+    ):
+        """Full reproduction of the Jagocoffee tx from the live session
+        (22 Jul 2026, Rp 10.000, SeaBank, via GoPay). This is the exact
+        payload that exposed the stale-pycache bug. If this fails, the
+        runtime plugin almost certainly has a stale .pyc cache.
+        """
+        response_page = _mock_notion_page_response(
+            self.NEW_TX_PAGE_ID,
+            nama="Jagocoffee",
+            jumlah=10000,
+            tipe="Pengeluaran",
+            kategori="Makanan & Minuman",
+            tanggal="2026-07-22",
+            rekening_ids=[self.ACC_ID],
+            catatan=(
+                "SeaBank …4309 → jagocoffee.com/ (Jakbar) via GoPay | "
+                "No. 2026072243507487745487900 | Ref 011100077J3Q"
+            ),
+        )
+        self._post_with_response(mock_httpx_client, response_page)
+
+        captured_body = {}
+
+        def capture_post(self, path, body=None):
+            captured_body["body"] = body
+            # Return response_page directly (already JSON-parsed dict), not
+            # the mock response object — save_transaction calls
+            # parse_transaction() which uses .get() on the result.
+            return response_page
+
+        notion_client._post = lambda path, body=None: capture_post(
+            notion_client, path, body
+        )
+
+        result = notion_client.save_transaction(
+            nama="Jagocoffee",
+            jumlah=10000,
+            tipe="Pengeluaran",
+            kategori="Makanan & Minuman",
+            tanggal="2026-07-22",
+            rekening_id=self.ACC_ID,
+            catatan=(
+                "SeaBank …4309 → jagocoffee.com/ (Jakbar) via GoPay | "
+                "No. 2026072243507487745487900 | Ref 011100077J3Q"
+            ),
+        )
+
+        body = captured_body["body"]
+
+        # The exact assertion that would have caught the bug:
+        assert body["properties"]["Rekening"] == {
+            "relation": [{"id": self.ACC_ID}]
+        }, (
+            "REGRESSION: Rekening relation is missing or malformed in save_transaction. "
+            "Check that client.py save_transaction (around line 285) is in sync with "
+            "the runtime plugin and that __pycache__ has been cleared."
+        )
+        assert result["rekening_id"] == self.ACC_ID
+        # Verify other fields
+        assert body["properties"]["Catatan"]["rich_text"][0]["text"]["content"].startswith(
+            "SeaBank"
+        )
