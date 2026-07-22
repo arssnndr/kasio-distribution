@@ -15,6 +15,7 @@ import os
 import time
 import random
 import logging
+from collections import defaultdict
 import httpx
 
 # Support both package mode (production: from .constants import ...) and
@@ -376,6 +377,40 @@ class NotionClient:
         accounts = [self.parse_account(p) for p in all_results]
         if not include_archived:
             accounts = [a for a in accounts if not a["archived"] and a["status"] != "Diarsipkan"]
+        # Compute saldo_live per account: saldo_awal + sum(non-archived
+        # transactions tied to this account). Single source of truth = tx DB.
+        accounts = self._attach_saldo_live(accounts)
+        return accounts
+
+    def _attach_saldo_live(self, accounts: list[dict]) -> list[dict]:
+        """Compute and attach `saldo_live` to each account dict.
+
+        saldo_live = saldo_awal + Σ(Pemasukan) − Σ(Pengeluaran)
+        over all non-archived transactions tied to this account. The
+        computation lives here (not on Notion) so the value is always
+        fresh — there is no chance of drift between stored saldo_live and
+        the underlying transactions.
+        """
+        if not accounts:
+            return accounts
+        account_ids = {a["id"] for a in accounts if a.get("id")}
+        # Fetch all transactions in one query and bucket by rekening_id.
+        # Cap at 1000 to bound memory; users with more rows can paginate
+        # explicitly via list_transactions().
+        txs = self.list_transactions(limit=1000)
+        saldo_delta: dict[str, int] = defaultdict(int)
+        for t in txs:
+            if t.get("archived"):
+                continue
+            rid = t.get("rekening_id")
+            if rid not in account_ids:
+                continue
+            if t.get("tipe") == "Pemasukan":
+                saldo_delta[rid] += t["jumlah"]
+            elif t.get("tipe") == "Pengeluaran":
+                saldo_delta[rid] -= t["jumlah"]
+        for a in accounts:
+            a["saldo_live"] = a["saldo_awal"] + saldo_delta.get(a["id"], 0)
         return accounts
 
     def save_account(

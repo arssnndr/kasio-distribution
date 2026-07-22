@@ -15,6 +15,9 @@ Handlers are sync because they're stateless; Notion API calls are blocking.
 from __future__ import annotations
 import json
 import base64
+import os
+import sys
+import subprocess
 from typing import Any
 
 # Support both package mode (production) and top-level mode (testing).
@@ -48,6 +51,54 @@ def get_vision() -> VisionAPI | None:
         except RuntimeError:
             return None
     return _vision
+
+
+def _maybe_refresh_summary_page():
+    """Re-render the Notion 'KASIO Ringkasan Harian' page after a transaction
+    mutation, so users see fresh saldo + cashflow without manual refresh.
+
+    Opt-in via KASIO_NOTION_SUMMARY_PAGE_ID env var. The refresh is best-effort:
+    failures here NEVER fail the originating transaction (which already
+    succeeded). Errors are logged to stderr for debugging.
+
+    Uses scripts/refresh_summary.py from the kasio-distribution repo. We
+    locate it by walking up from this file's directory until we find a
+    'scripts/refresh_summary.py' sibling, so the plugin works whether
+    installed as part of the kasio-distribution package or as a standalone
+    Hermes plugin (in which case summary auto-refresh is simply skipped).
+    """
+    page_id = os.environ.get("KASIO_NOTION_SUMMARY_PAGE_ID")
+    if not page_id:
+        return  # user opted out — feature is opt-in
+    # Locate scripts/refresh_summary.py
+    here = os.path.dirname(os.path.abspath(__file__))
+    candidates = [
+        os.path.join(here, "..", "..", "scripts", "refresh_summary.py"),  # plugin source layout
+        os.path.join(here, "..", "scripts", "refresh_summary.py"),       # plugin installed layout
+    ]
+    script = next((p for p in candidates if os.path.exists(p)), None)
+    if not script:
+        print(
+            f"[kasio] KASIO_NOTION_SUMMARY_PAGE_ID set but scripts/refresh_summary.py "
+            f"not found. Looked in: {candidates}",
+            file=sys.stderr,
+        )
+        return
+    try:
+        # Use the same Python interpreter that's running the plugin. Inherit
+        # env so NOTION_API_KEY, KASIO_*_DS_ID, KASIO_NOTION_SUMMARY_PAGE_ID
+        # all reach the child process.
+        subprocess.run(
+            [sys.executable, script],
+            check=False,         # don't propagate failure to caller
+            timeout=30,          # cap so a Notion outage can't hang us
+            capture_output=True, # suppress child stdout (too noisy for every tx)
+        )
+    except subprocess.TimeoutExpired:
+        print(f"[kasio] refresh_summary.py timed out after 30s", file=sys.stderr)
+    except Exception as e:
+        print(f"[kasio] refresh_summary.py failed: {type(e).__name__}: {e}",
+              file=sys.stderr)
 
 
 def _to_json(obj: Any) -> str:
@@ -150,9 +201,9 @@ def handle_save_transaction(args: dict) -> str:
             kategori=args["kategori"],
             tanggal=args.get("tanggal"),
             catatan=args.get("catatan", ""),
-            rekening_id=args.get("rekening_id"),
-            transfer_group=args.get("transfer_group"),
         )
+        # Auto-refresh Notion summary page (best-effort, opt-in)
+        _maybe_refresh_summary_page()
         return _to_json({"saved": True, "transaction": tx})
     except Exception as e:
         return _err(f"Save transaction failed: {type(e).__name__}: {e}")
@@ -196,6 +247,8 @@ def handle_update_transaction(args: dict) -> str:
     try:
         notion = get_notion()
         tx = notion.update_transaction(args["page_id"], args["updates"])
+        # Auto-refresh Notion summary page (best-effort, opt-in)
+        _maybe_refresh_summary_page()
         return _to_json({"updated": True, "transaction": tx})
     except Exception as e:
         return _err(f"Update transaction failed: {type(e).__name__}: {e}")
@@ -225,6 +278,8 @@ def handle_archive_transaction(args: dict) -> str:
     try:
         notion = get_notion()
         tx = notion.archive_transaction(args["page_id"])
+        # Auto-refresh Notion summary page (best-effort, opt-in)
+        _maybe_refresh_summary_page()
         return _to_json({"archived": True, "id": tx["id"]})
     except Exception as e:
         return _err(f"Archive transaction failed: {type(e).__name__}: {e}")

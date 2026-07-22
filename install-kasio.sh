@@ -155,7 +155,7 @@ echo -e "${BLUE}[env]${NC} Setup env (skip kalau sudah ada)..."
 append_if_empty "NOTION_API_KEY" "Notion integration key (https://www.notion.so/my-integrations)"
 append_if_empty "KASIO_TRANSACTIONS_DS_ID" "Notion data source ID untuk transactions DB"
 append_if_empty "KASIO_ACCOUNTS_DS_ID" "Notion data source ID untuk accounts DB"
-
+# Optional
 if ! grep -q "^MINIMAX_API_KEY=.\\+" "${ENV_FILE}" 2>/dev/null; then
     echo
     echo -e "${YELLOW}→ MINIMAX_API_KEY${NC} (optional — untuk vision reading foto struk)"
@@ -163,6 +163,18 @@ if ! grep -q "^MINIMAX_API_KEY=.\\+" "${ENV_FILE}" 2>/dev/null; then
     read -p "  Value (optional): " mm_key
     if [ -n "${mm_key}" ]; then
         echo "MINIMAX_API_KEY=${mm_key}" >> "${ENV_FILE}"
+    fi
+fi
+
+# Optional: KASIO_NOTION_SUMMARY_PAGE_ID (auto-refresh ringkasan page)
+if ! grep -q "^KASIO_NOTION_SUMMARY_PAGE_ID=.\\+" "${ENV_FILE}" 2>/dev/null; then
+    echo
+    echo -e "${YELLOW}→ KASIO_NOTION_SUMMARY_PAGE_ID${NC} (optional — auto-update Notion summary page)"
+    echo "  Skip kalau tidak pakai fitur auto-refresh (tekan Enter)"
+    echo "  Cara dapat ID: buka page ringkasan di Notion → copy ID dari URL."
+    read -p "  Value (optional): " page_id
+    if [ -n "${page_id}" ]; then
+        echo "KASIO_NOTION_SUMMARY_PAGE_ID=${page_id}" >> "${ENV_FILE}"
     fi
 fi
 

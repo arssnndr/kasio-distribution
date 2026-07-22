@@ -636,3 +636,231 @@ class TestUpdateTransaction:
         # Without the fix, result would have rekening_id == None or stale value
         # because parse_transaction re-reads the (unchanged) Notion page.
         assert result.get("rekening_id") == self.NEW_ACC_ID
+
+
+class TestListAccountsSaldoLive:
+    """Tests for list_accounts() attaching computed `saldo_live` to each
+    account dict. saldo_live = saldo_awal + Σ(Pemasukan) − Σ(Pengeluaran).
+    See client._attach_saldo_live."""
+
+    def _mock_account_page(self, page_id, nama, saldo_awal, status="Aktif", archived=False, urutan=None):
+        return {
+            "object": "page", "id": page_id, "archived": archived,
+            "properties": {
+                "Nama": {"type": "title", "title": [{"type": "text", "text": {"content": nama}, "plain_text": nama}]},
+                "Saldo Awal": {"type": "number", "number": saldo_awal},
+                "Status": {"type": "select", "select": {"name": status}},
+                "Urutan": {"type": "number", "number": urutan},
+                "Ikon": {"type": "rich_text", "rich_text": []},
+                "Nomor Rekening": {"type": "rich_text", "rich_text": []},
+            },
+        }
+
+    def _mock_tx_page(self, page_id, rekening_id, tipe, jumlah, archived=False):
+        rel_field = {"relation": [{"id": rekening_id}]} if rekening_id else {"relation": []}
+        return {
+            "object": "page", "id": page_id, "archived": archived,
+            "properties": {
+                "Nama": {"type": "title", "title": []},
+                "Angka": {"type": "number", "number": jumlah},
+                "Tipe": {"type": "select", "select": {"name": tipe}},
+                "Kategori": {"type": "select", "select": {"name": "Lainnya"}},
+                "Tanggal": {"type": "date", "date": {"start": "2026-07-21"}},
+                "Catatan": {"type": "rich_text", "rich_text": []},
+                "Rekening": {"type": "relation", **rel_field},
+                "Transfer Group ID": {"type": "rich_text", "rich_text": []},
+            },
+        }
+
+    def _setup_paginated_query(self, mock_httpx_client, account_pages, tx_pages):
+        """Mock Notion to return given pages from /query endpoint based on path."""
+        def fake_post(url, *args, **kwargs):
+            resp = MagicMock(spec=httpx.Response)
+            resp.status_code = 200
+            if "/data_sources/" in url and "/query" in url:
+                # Return accounts or transactions based on body property names
+                body = kwargs.get("json", {})
+                if "Nama" in str(body) or body == {}:
+                    pass  # default
+                # Heuristic: check if request body has 'Nama' style props
+                # Easier: check URL contains accounts or transactions DS
+                # We rely on the fact that data source IDs are different.
+                # The mock fixture uses accounts_ds_id; tx uses transactions_ds_id.
+                if "accounts" in url.lower() or (account_pages and "/query" in url):
+                    pass
+                return resp
+            resp.raise_for_status = lambda: None
+            return resp
+        # Simpler: just return based on DS in URL
+        def route_based_post(url, *args, **kwargs):
+            resp = MagicMock(spec=httpx.Response)
+            resp.status_code = 200
+            resp.raise_for_status = lambda: None
+            from urllib.parse import urlparse
+            parsed = urlparse(url)
+            path = parsed.path
+            if self.TX_DS_ID in path:
+                resp.json.return_value = {"results": tx_pages, "has_more": False}
+            else:
+                resp.json.return_value = {"results": account_pages, "has_more": False}
+            return resp
+        # We need to make mock_httpx_client.request return based on URL
+        # Create separate response objects and use side_effect
+        accounts_resp = MagicMock(spec=httpx.Response)
+        accounts_resp.status_code = 200
+        accounts_resp.json.return_value = {"results": account_pages, "has_more": False}
+        accounts_resp.raise_for_status = lambda: None
+
+        tx_resp = MagicMock(spec=httpx.Response)
+        tx_resp.status_code = 200
+        tx_resp.json.return_value = {"results": tx_pages, "has_more": False}
+        tx_resp.raise_for_status = lambda: None
+
+        # mock_httpx_client.request returns one for each call
+        responses = [accounts_resp, tx_resp]
+        mock_httpx_client.request.side_effect = responses
+
+    TX_DS_ID = "11111111-1111-1111-1111-111111111111"
+    ACC_DS_ID = "22222222-2222-2222-2222-222222222222"
+
+    def test_saldo_live_reflects_saldo_awal_when_no_transactions(
+        self, notion_client, mock_httpx_client
+    ):
+        """Empty transactions DB → saldo_live == saldo_awal for all accounts."""
+        cash_page = self._mock_account_page("acc-cash", "Cash", 194000, urutan=3)
+        bc_page = self._mock_account_page("acc-bca", "BCA", 33456, urutan=2)
+        self._setup_paginated_query(mock_httpx_client, [bc_page, cash_page], [])
+
+        result = notion_client.list_accounts()
+
+        by_name = {a["nama"]: a for a in result}
+        assert by_name["Cash"]["saldo_awal"] == 194000
+        assert by_name["Cash"]["saldo_live"] == 194000
+        assert by_name["BCA"]["saldo_awal"] == 33456
+        assert by_name["BCA"]["saldo_live"] == 33456
+
+    def test_saldo_live_subtracts_pengeluaran(
+        self, notion_client, mock_httpx_client
+    ):
+        """saldo_live = saldo_awal − sum(Pengeluaran) for an account."""
+        cash_page = self._mock_account_page("acc-cash", "Cash", 194000, urutan=1)
+        tx1 = self._mock_tx_page("tx-1", "acc-cash", "Pengeluaran", 50000)
+        tx2 = self._mock_tx_page("tx-2", "acc-cash", "Pengeluaran", 22000)
+        self._setup_paginated_query(mock_httpx_client, [cash_page], [tx1, tx2])
+
+        result = notion_client.list_accounts()
+        cash = next(a for a in result if a["nama"] == "Cash")
+        assert cash["saldo_awal"] == 194000
+        assert cash["saldo_live"] == 194000 - 50000 - 22000  # 122000
+
+    def test_saldo_live_adds_pemasukan(
+        self, notion_client, mock_httpx_client
+    ):
+        """saldo_live includes +Σ(Pemasukan)."""
+        cash_page = self._mock_account_page("acc-cash", "Cash", 100000, urutan=1)
+        tx1 = self._mock_tx_page("tx-1", "acc-cash", "Pemasukan", 50000)
+        tx2 = self._mock_tx_page("tx-2", "acc-cash", "Pengeluaran", 30000)
+        self._setup_paginated_query(mock_httpx_client, [cash_page], [tx1, tx2])
+
+        result = notion_client.list_accounts()
+        cash = next(a for a in result if a["nama"] == "Cash")
+        # 100000 + 50000 - 30000 = 120000
+        assert cash["saldo_live"] == 120000
+
+    def test_saldo_live_per_account_isolation(
+        self, notion_client, mock_httpx_client
+    ):
+        """Each account's saldo_live is independent — tx on Cash doesn't
+        affect BCA saldo_live."""
+        cash_page = self._mock_account_page("acc-cash", "Cash", 100000, urutan=2)
+        bc_page = self._mock_account_page("acc-bca", "BCA", 33456, urutan=1)
+        tx_cash = self._mock_tx_page("tx-1", "acc-cash", "Pengeluaran", 70000)
+        self._setup_paginated_query(mock_httpx_client, [bc_page, cash_page], [tx_cash])
+
+        result = notion_client.list_accounts()
+        cash = next(a for a in result if a["nama"] == "Cash")
+        bca = next(a for a in result if a["nama"] == "BCA")
+        assert cash["saldo_live"] == 30000
+        assert bca["saldo_live"] == 33456  # unaffected
+
+    def test_saldo_live_ignores_archived_transactions(
+        self, notion_client, mock_httpx_client
+    ):
+        """Archived (soft-deleted) transactions are excluded from saldo_live."""
+        cash_page = self._mock_account_page("acc-cash", "Cash", 100000, urutan=1)
+        tx_live = self._mock_tx_page("tx-1", "acc-cash", "Pengeluaran", 30000, archived=False)
+        tx_archived = self._mock_tx_page("tx-2", "acc-cash", "Pengeluaran", 40000, archived=True)
+        self._setup_paginated_query(mock_httpx_client, [cash_page], [tx_live, tx_archived])
+
+        result = notion_client.list_accounts()
+        cash = next(a for a in result if a["nama"] == "Cash")
+        # 100000 - 30000 = 70000 (the archived 40000 should be ignored)
+        assert cash["saldo_live"] == 70000
+
+    def test_saldo_live_ignores_transactions_to_other_accounts(
+        self, notion_client, mock_httpx_client
+    ):
+        """Transactions tied to other accounts must not affect saldo_live."""
+        cash_page = self._mock_account_page("acc-cash", "Cash", 100000, urutan=1)
+        bc_page = self._mock_account_page("acc-bca", "BCA", 50000, urutan=2)
+        # Tx to BCA, not Cash
+        tx_bc = self._mock_tx_page("tx-1", "acc-bca", "Pengeluaran", 20000)
+        self._setup_paginated_query(mock_httpx_client, [bc_page, cash_page], [tx_bc])
+
+        result = notion_client.list_accounts()
+        cash = next(a for a in result if a["nama"] == "Cash")
+        bca = next(a for a in result if a["nama"] == "BCA")
+        assert cash["saldo_live"] == 100000  # unaffected
+        assert bca["saldo_live"] == 30000
+
+    def test_saldo_live_ignores_transactions_with_no_rekening(
+        self, notion_client, mock_httpx_client
+    ):
+        """Edge case: tx with rekening_id missing or empty should not crash
+        and should not contribute to any account."""
+        cash_page = self._mock_account_page("acc-cash", "Cash", 50000, urutan=1)
+        tx_no_rekening = self._mock_tx_page("tx-orphan", None, "Pengeluaran", 99999)
+        self._setup_paginated_query(mock_httpx_client, [cash_page], [tx_no_rekening])
+
+        result = notion_client.list_accounts()
+        cash = next(a for a in result if a["nama"] == "Cash")
+        assert cash["saldo_live"] == 50000
+
+    def test_saldo_live_for_archived_accounts_excluded(
+        self, notion_client, mock_httpx_client
+    ):
+        """When include_archived=False (default), archived accounts are
+        filtered out before saldo_live is attached. The remaining accounts
+        still get saldo_live correctly."""
+        cash_page = self._mock_account_page("acc-cash", "Cash", 100000, urutan=1, archived=False)
+        old_page = self._mock_account_page("acc-old", "Lama", 50000, urutan=99, archived=True)
+        tx = self._mock_tx_page("tx-1", "acc-cash", "Pengeluaran", 20000)
+        self._setup_paginated_query(mock_httpx_client, [old_page, cash_page], [tx])
+
+        result = notion_client.list_accounts(include_archived=False)
+        assert all(a["nama"] != "Lama" for a in result)
+        cash = next(a for a in result if a["nama"] == "Cash")
+        assert cash["saldo_live"] == 80000
+
+    def test_saldo_live_with_zero_transactions(
+        self, notion_client, mock_httpx_client
+    ):
+        """Brand new account, no transactions yet → saldo_live == saldo_awal."""
+        new_page = self._mock_account_page("acc-new", "BankBaru", 25000, urutan=10)
+        self._setup_paginated_query(mock_httpx_client, [new_page], [])
+
+        result = notion_client.list_accounts()
+        new = next(a for a in result if a["nama"] == "BankBaru")
+        assert new["saldo_live"] == 25000
+
+    def test_saldo_live_with_negative_balance(
+        self, notion_client, mock_httpx_client
+    ):
+        """saldo_live can go negative (overdraft scenario)."""
+        cash_page = self._mock_account_page("acc-cash", "Cash", 50000, urutan=1)
+        tx_big = self._mock_tx_page("tx-1", "acc-cash", "Pengeluaran", 75000)
+        self._setup_paginated_query(mock_httpx_client, [cash_page], [tx_big])
+
+        result = notion_client.list_accounts()
+        cash = next(a for a in result if a["nama"] == "Cash")
+        assert cash["saldo_live"] == -25000  # overdraft OK

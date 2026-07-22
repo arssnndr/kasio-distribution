@@ -180,6 +180,20 @@ if (-not $mmExisting) {
     if ($mm_key) { Add-Content -Path $EnvFile -Value "MINIMAX_API_KEY=$mm_key" }
 }
 
+# Optional: KASIO_NOTION_SUMMARY_PAGE_ID
+$nsExisting = if (Test-Path $EnvFile) {
+    Select-String -Path $EnvFile -Pattern "^KASIO_NOTION_SUMMARY_PAGE_ID=.+" -Quiet -ErrorAction SilentlyContinue
+} else { $false }
+if (-not $nsExisting) {
+    Write-Host ""
+    Write-Host "-> KASIO_NOTION_SUMMARY_PAGE_ID" -ForegroundColor Yellow
+    Write-Host "  Optional - auto-update Notion summary page setiap transaksi baru"
+    Write-Host "  Skip kalau tidak pakai fitur ini (tekan Enter)"
+    Write-Host "  Cara dapat ID: buka page ringkasan di Notion, copy ID dari URL."
+    $page_id = Read-Host "  Value (optional)"
+    if ($page_id) { Add-Content -Path $EnvFile -Value "KASIO_NOTION_SUMMARY_PAGE_ID=$page_id" }
+}
+
 Write-Host ""
 Write-Host "========================================" -ForegroundColor Cyan
 Write-Host " Done!" -ForegroundColor Green
