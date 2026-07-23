@@ -63,6 +63,29 @@ def notion_client(mock_httpx_client):
     return NotionClient()
 
 
+@pytest.fixture
+def reset_refresh_state():
+    """Clear the debounce state before each test that uses it.
+
+    The debounce timer and pending count are module-level globals; if a
+    prior test left a timer running or a non-zero count, subsequent tests
+    would see leftover state and fail.
+    """
+    import client as client_mod
+    with client_mod._refresh_lock:
+        if client_mod._refresh_timer is not None:
+            client_mod._refresh_timer.cancel()
+            client_mod._refresh_timer = None
+        client_mod._pending_mutation_count = 0
+    yield
+    # Cleanup after test
+    with client_mod._refresh_lock:
+        if client_mod._refresh_timer is not None:
+            client_mod._refresh_timer.cancel()
+            client_mod._refresh_timer = None
+        client_mod._pending_mutation_count = 0
+
+
 # ============================================================================
 # _calculate_backoff
 # ============================================================================
@@ -1337,16 +1360,21 @@ class TestSaveTransaction:
             "SeaBank"
         )
 
-    def test_save_transaction_triggers_auto_refresh_hook(
-        self, notion_client, mock_httpx_client, monkeypatch
+    def test_save_transaction_schedules_debounced_refresh(
+        self, notion_client, mock_httpx_client, monkeypatch, reset_refresh_state
     ):
-        """REGRESSION: save_transaction must auto-refresh the Notion summary
-        page so users see fresh saldo after every transaction.
+        """REGRESSION: save_transaction must trigger an auto-refresh of the
+        Notion summary page so users see fresh saldo after every transaction.
 
         Bug pre-fix: hook was only in handle_save_transaction (tools.py),
         so direct client.save_transaction() calls (used by all internal
         code paths and tests) bypassed the refresh — page only updated
         via Telegram gateway path.
+
+        After debounce refactor (commit 037e61a follow-up): the call is
+        debounced via _schedule_refresh() so a batch of N mutations fires
+        1 refresh instead of N. We assert the SCHEDULER is called, not the
+        underlying hook (which would fire on a timer).
         """
         response_page = _mock_notion_page_response(
             self.NEW_TX_PAGE_ID,
@@ -1355,8 +1383,15 @@ class TestSaveTransaction:
         )
         self._post_with_response(mock_httpx_client, response_page)
 
-        # Spy on _maybe_refresh_summary_page
+        # Spy on _schedule_refresh (the debounced entry point).
         import client as client_mod
+        scheduled = {"count": 0}
+        def spy_schedule():
+            scheduled["count"] += 1
+        monkeypatch.setattr(client_mod, "_schedule_refresh", spy_schedule)
+
+        # And spy on _maybe_refresh_summary_page — it must NOT be called
+        # directly by save_transaction (it would defeat the debouncer).
         fired = {"count": 0}
         def spy_hook():
             fired["count"] += 1
@@ -1371,9 +1406,81 @@ class TestSaveTransaction:
             rekening_id=self.ACC_ID,
         )
 
-        assert fired["count"] == 1, (
-            f"Hook fired {fired['count']} times, expected 1. "
-            "save_transaction must call _maybe_refresh_summary_page once "
-            "after successful Notion POST."
+        assert scheduled["count"] == 1, (
+            f"_schedule_refresh called {scheduled['count']} times, expected 1. "
+            "save_transaction must call _schedule_refresh once per mutation."
         )
+        assert fired["count"] == 0, (
+            f"_maybe_refresh_summary_page called {fired['count']} times "
+            "directly from save_transaction. That bypasses the debouncer — "
+            "save_transaction should call _schedule_refresh only."
+        )
+
+    def test_flush_pending_refresh_fires_hook_immediately(
+        self, notion_client, mock_httpx_client, monkeypatch, reset_refresh_state
+    ):
+        """flush_pending_refresh() must cancel the debounce timer and run
+        the hook synchronously, so callers (e.g. batch scripts, gateway
+        shutdown) can deterministically wait for the page to refresh.
+        """
+        import client as client_mod
+        fired = {"count": 0}
+        def spy_hook():
+            fired["count"] += 1
+        monkeypatch.setattr(client_mod, "_maybe_refresh_summary_page", spy_hook)
+
+        # Schedule a refresh, then flush it
+        client_mod._schedule_refresh()
+        assert client_mod.get_pending_mutation_count() == 1
+        client_mod.flush_pending_refresh()
+        assert fired["count"] == 1, (
+            "flush_pending_refresh did not invoke the hook"
+        )
+        assert client_mod.get_pending_mutation_count() == 0
+        assert client_mod._refresh_timer is None, (
+            "flush_pending_refresh left a dangling timer"
+        )
+
+    def test_debounce_collapse_rapid_mutations(
+        self, notion_client, mock_httpx_client, monkeypatch, reset_refresh_state
+    ):
+        """Five rapid save_transaction calls should fire the hook exactly
+        ONCE (collapse), not five times.
+
+        We force debounce=2s here so the test doesn't take 30s, and wait
+        ~3s for the timer to fire.
+        """
+        import client as client_mod
+        monkeypatch.setenv("KASIO_REFRESH_DEBOUNCE_SEC", "2")
+        # Re-import the module-level constant (read at import time)
+        import importlib
+        importlib.reload(client_mod)
+        # Restore the new function reference (reload creates new module)
+        import sys
+        # Actually, simpler: directly monkey-patch the debounce window
+        client_mod._REFRESH_DEBOUNCE_SEC = 2.0
+
+        fired = {"count": 0}
+        def spy_hook():
+            fired["count"] += 1
+        monkeypatch.setattr(client_mod, "_maybe_refresh_summary_page", spy_hook)
+
+        # Schedule 5 refreshes in quick succession (collapse pattern)
+        for _ in range(5):
+            client_mod._schedule_refresh()
+        assert client_mod.get_pending_mutation_count() == 5
+        # Hook must NOT have fired yet (window is 2s)
+        assert fired["count"] == 0, (
+            f"Hook fired {fired['count']} times during debounce window"
+        )
+
+        # Wait for window to expire
+        import time
+        time.sleep(2.5)
+
+        # Now hook should have fired exactly once
+        assert fired["count"] == 1, (
+            f"Expected 1 hook fire after debounce window, got {fired['count']}"
+        )
+        assert client_mod.get_pending_mutation_count() == 0
 

@@ -14,6 +14,7 @@ from __future__ import annotations
 import os
 import time
 import random
+import threading
 import logging
 from collections import defaultdict
 import httpx
@@ -113,6 +114,95 @@ def _maybe_refresh_summary_page() -> None:
         print(f"[kasio] refresh_summary.py failed: {type(e).__name__}: {e}",
               file=sys.stderr)
 
+
+# ---------------------------------------------------------------------------
+# Debounced refresh
+# ---------------------------------------------------------------------------
+# When multiple mutations land close together (e.g. a 5-transaction batch),
+# spawning one refresh per mutation is wasteful -- each refresh takes ~20s
+# (3 chart uploads + Notion page block re-write). Instead, collect mutations
+# within a window and fire one refresh after the window goes idle.
+#
+# Env:
+#   KASIO_REFRESH_DEBOUNCE_SEC  Window length (default 30). 0 = legacy
+#                               per-mutation behavior (no debouncing).
+#
+# Public entry point: _schedule_refresh() -- call from mutation methods.
+# Public manual entry point: flush_pending_refresh() -- call before shutdown.
+
+_REFRESH_DEBOUNCE_SEC = float(os.environ.get("KASIO_REFRESH_DEBOUNCE_SEC", "30"))
+_refresh_lock = threading.Lock()
+_refresh_timer: threading.Timer | None = None
+_pending_mutation_count: int = 0
+
+
+def _schedule_refresh() -> None:
+    """Schedule a debounced Notion summary page refresh.
+
+    Multiple calls within the debounce window collapse into a single refresh
+    that fires `_REFRESH_DEBOUNCE_SEC` after the LAST call. If
+    KASIO_REFRESH_DEBOUNCE_SEC=0, refreshes immediately (legacy behavior).
+    """
+    global _refresh_timer, _pending_mutation_count
+
+    if _REFRESH_DEBOUNCE_SEC <= 0:
+        _maybe_refresh_summary_page()
+        return
+
+    with _refresh_lock:
+        _pending_mutation_count += 1
+        # Cancel any pending timer -- we want to fire only after the window
+        # goes quiet. Last writer wins.
+        if _refresh_timer is not None:
+            _refresh_timer.cancel()
+        _refresh_timer = threading.Timer(
+            _REFRESH_DEBOUNCE_SEC, _fire_debounced_refresh
+        )
+        _refresh_timer.daemon = True
+        _refresh_timer.start()
+
+
+def _fire_debounced_refresh() -> None:
+    """Called by the debounce timer. Runs the actual refresh in a worker
+    thread so the caller (mutation method) is not blocked."""
+    global _refresh_timer, _pending_mutation_count
+    with _refresh_lock:
+        _refresh_timer = None
+        n = _pending_mutation_count
+        _pending_mutation_count = 0
+    try:
+        _maybe_refresh_summary_page()
+    except Exception as e:
+        print(
+            f"[kasio] debounced refresh failed after {n} mutations: "
+            f"{type(e).__name__}: {e}",
+            file=sys.stderr,
+        )
+
+
+def flush_pending_refresh(timeout: float = 60.0) -> None:
+    """Force any pending debounced refresh to run NOW and block until it
+    completes. Call before shutdown or after the last mutation of a batch
+    if you need deterministic synchronization.
+
+    Blocks up to `timeout` seconds.
+    """
+    global _refresh_timer, _pending_mutation_count
+    with _refresh_lock:
+        if _refresh_timer is None:
+            return
+        _refresh_timer.cancel()
+        _refresh_timer = None
+        n = _pending_mutation_count
+        _pending_mutation_count = 0
+    _maybe_refresh_summary_page()
+
+
+def get_pending_mutation_count() -> int:
+    """For tests/diagnostics: how many mutations are queued for the next
+    debounced refresh?"""
+    with _refresh_lock:
+        return _pending_mutation_count
 
 
 class NotionClient:
@@ -348,9 +438,9 @@ class NotionClient:
         # Notion 2025-09-03: parent must use data_source_id, not database_id
         data = self._post("/pages", {"parent": {"type": "data_source_id", "data_source_id": self.transactions_ds_id}, "properties": properties})
         result = self.parse_transaction(data)
-        # Auto-refresh Notion summary page (best-effort, opt-in). See
-        # _maybe_refresh_summary_page for details.
-        _maybe_refresh_summary_page()
+        # Debounced auto-refresh: collapse rapid mutations into 1 Notion
+        # page update (avoids 3 chart re-uploads per tx in a batch).
+        _schedule_refresh()
         return result
 
     def update_transaction(self, page_id: str, updates: dict) -> dict:
@@ -389,14 +479,14 @@ class NotionClient:
                 properties[notion_field] = {"rich_text": [{"text": {"content": value or ""}}]}
         data = self._patch(f"/pages/{page_id}", {"properties": properties})
         result = self.parse_transaction(data)
-        _maybe_refresh_summary_page()
+        _schedule_refresh()
         return result
 
     def archive_transaction(self, page_id: str) -> dict:
         """Soft-delete (archive) transaction."""
         data = self._patch(f"/pages/{page_id}", {"archived": True})
         result = self.parse_transaction(data)
-        _maybe_refresh_summary_page()
+        _schedule_refresh()
         return result
 
     # ------------------------------------------------------------------
@@ -502,7 +592,9 @@ class NotionClient:
             properties[ACCT_PROP["nomor_rekening"]] = {"rich_text": [{"text": {"content": nomor_rekening}}]}
         # Notion 2025-09-03: parent must use data_source_id, not database_id
         data = self._post("/pages", {"parent": {"type": "data_source_id", "data_source_id": self.accounts_ds_id}, "properties": properties})
-        return self.parse_account(data)
+        result = self.parse_account(data)
+        _schedule_refresh()
+        return result
 
     def update_account(self, page_id: str, updates: dict) -> dict:
         """Update fields on existing account."""
@@ -522,10 +614,14 @@ class NotionClient:
             elif key == "nomor_rekening":
                 properties[notion_field] = {"rich_text": [{"text": {"content": value or ""}}]}
         data = self._patch(f"/pages/{page_id}", {"properties": properties})
-        return self.parse_account(data)
+        result = self.parse_account(data)
+        _schedule_refresh()
+        return result
 
     def archive_account(self, page_id: str) -> dict:
         """Soft-delete (archive) account. Sets status to Diarsipkan + archives."""
         self.update_account(page_id, {"status": "Diarsipkan"})
         data = self._patch(f"/pages/{page_id}", {"archived": True})
-        return self.parse_account(data)
+        result = self.parse_account(data)
+        _schedule_refresh()
+        return result
